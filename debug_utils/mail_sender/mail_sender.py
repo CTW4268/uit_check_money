@@ -15,12 +15,20 @@ from email.header import Header
 from email.utils import formataddr
 
 from libs.api_client import login as api_login, get_account_list
+from libs import school_profile
+
+# 配置/模板目录按脚本自身位置解析
+_CFG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
+
+
+def _default_sender_name():
+    return f"{school_profile.get('school_name', '')}水电费监控系统"
 
 
 def load_mail_config():
     try:
         config = configparser.ConfigParser()
-        files_read = config.read('config/mail_setting.ini', encoding='utf-8')
+        files_read = config.read(os.path.join(_CFG_DIR, 'mail_setting.ini'), encoding='utf-8')
         if not files_read:
             raise FileNotFoundError("无法读取 config/mail_setting.ini 配置文件，请检查文件是否存在且可访问")
         if 'smtp' not in config:
@@ -36,7 +44,7 @@ def load_mail_config():
             'username': config.get('smtp', 'username'),
             'password': config.get('smtp', 'password'),
             'sender': config.get('smtp', 'sender'),
-            'sender_name': config.get('smtp', 'sender_name', fallback='三一工学院水电费监控系统'),
+            'sender_name': (config.get('smtp', 'sender_name', fallback='') or _default_sender_name()),
             'receivers': receivers,
             'encryption': config.get('smtp', 'encryption', fallback='ssl')
         }
@@ -47,7 +55,7 @@ def load_mail_config():
 
 def load_mail_template():
     try:
-        with open('config/mail_texter.txt', 'r', encoding='utf-8') as f:
+        with open(os.path.join(_CFG_DIR, 'mail_texter.txt'), 'r', encoding='utf-8') as f:
             return f.read()
     except FileNotFoundError:
         raise FileNotFoundError("无法找到邮件模板文件 config/mail_texter.txt，请检查文件是否存在")
@@ -73,13 +81,14 @@ def format_mail_content(template, data):
     template_lines = [line for line in template.split('\n') if not line.strip().startswith('#')]
     clean_template = '\n'.join(template_lines)
     final_content = clean_template.replace('{{DATA_SECTION}}', data_content.strip())
-    return final_content
+    # 模板里可以用 {school_name} 占位，按学校档案替换（默认档案为湖南工业大学）
+    return final_content.replace('{school_name}', school_profile.get('school_name', ''))
 
 
 def send_mail(config, subject, content):
     try:
         message = MIMEText(content, 'plain', 'utf-8')
-        sender_name = config.get('sender_name', '三一工学院水电费监控系统')
+        sender_name = config.get('sender_name', _default_sender_name())
         message['From'] = formataddr((sender_name, config['sender']))
         message['To'] = ', '.join(config['receivers'])
         message['Subject'] = Header(subject, 'utf-8')
@@ -99,16 +108,20 @@ def send_mail(config, subject, content):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("用法: ./debug_utils/mail_sender/mail_sender.py <账号> <密码>")
+    flags = [a for a in sys.argv[1:] if a.startswith('-')]
+    args = [a for a in sys.argv[1:] if not a.startswith('-')]
+    dry_run = '--dry-run' in flags
+    if not args or len(args) > 2:
+        print("用法: ./debug_utils/mail_sender/mail_sender.py <账号> [密码] [--dry-run]")
+        print("  --dry-run  只打印邮件主题和正文，不发送（不需要 SMTP 配置）")
         sys.exit(1)
 
-    phone_num = sys.argv[1]
-    password = sys.argv[2]
+    phone_num = args[0]
+    # 密码可选：湖南工业大学走统一身份认证，不传密码时用学号直接换 appUserId/roleId
+    password = args[1] if len(args) == 2 else None
 
     print("正在登录...")
     login_result = api_login(phone_num, password)
-
     if not login_result or login_result.get('code') != 200:
         print("登录失败")
         print(login_result)
@@ -134,17 +147,28 @@ def main():
 
     print("数据获取成功")
 
-    print("正在加载邮件配置和模板...")
+    print("正在加载邮件模板...")
     try:
-        mail_config = load_mail_config()
         mail_template = load_mail_template()
     except Exception as e:
-        print(f"加载邮件配置或模板失败: {e}")
+        print(f"加载邮件模板失败: {e}")
         sys.exit(1)
 
-    print("正在格式化邮件内容...")
     mail_content = format_mail_content(mail_template, data_result)
-    mail_subject = "三一工学院宿舍水电费信息"
+    mail_subject = f"{school_profile.get('school_name', '')}宿舍水电费信息"
+
+    if dry_run:
+        print("=== --dry-run：下面这封邮件不会真的发出 ===")
+        print(f"主题: {mail_subject}")
+        print(mail_content)
+        return
+
+    print("正在加载邮件配置...")
+    try:
+        mail_config = load_mail_config()
+    except Exception as e:
+        print(f"加载邮件配置失败: {e}")
+        sys.exit(1)
 
     print("正在发送邮件...")
     if send_mail(mail_config, mail_subject, mail_content):

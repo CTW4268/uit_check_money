@@ -252,15 +252,32 @@ python3 debug_utils/get_data.py <appUserId> <roleId>
 
 ### 5. 邮件预警
 
-配置邮件发送参数后，启动监控服务：
+先复制配置（阈值 / SMTP 凭据，都是 gitignored，不会进仓库）：
 
 ```bash
-# SMTP方式
-./debug_utils/monitor_daemon/monitor_daemon.py <账号> <密码>
-
-# Aoksend API方式
-./debug_utils/monitor_aoksender/monitor_aoksender.py <账号> <密码>
+cp debug_utils/monitor_daemon/config/example_monitor_config.ini debug_utils/monitor_daemon/config/monitor_config.ini
+cp debug_utils/monitor_daemon/config/example_mail_setting.ini  debug_utils/monitor_daemon/config/mail_setting.ini
 ```
+
+**先用 dry-run 看会不会告警、正文长什么样——不发信、不需要 SMTP 配置**：
+
+```bash
+./debug_utils/monitor_daemon/monitor_daemon.py <学号> --dry-run
+./debug_utils/monitor_aoksender/monitor_aoksender.py <学号> --dry-run   # Aoksend API 方式
+./debug_utils/mail_sender/mail_sender.py <学号> --dry-run               # 只发一封
+```
+
+确认无误后去掉 `--dry-run` 正式跑（本校密码可省略，走统一身份认证；这些循环都是**手动启动**、
+不会开机自启）：
+
+```bash
+./debug_utils/monitor_daemon/monitor_daemon.py <学号> [密码]      # SMTP，轮询 + 低于阈值发信
+./debug_utils/monitor_aoksender/monitor_aoksender.py <学号> [密码] # Aoksend API
+```
+
+阈值在 `monitor_config.ini`（`ele_num` 电费 / `water_num` 水费，单位元）、检查周期 `check_round` 秒；
+邮件正文模板是 `config/mail_texter.txt`，其中 `{school_name}` 会按学校档案自动替换，
+发件人名与主题也取自学校档案（不再写死某一所学校）。
 
 ### 6. Web服务
 
