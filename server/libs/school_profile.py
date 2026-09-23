@@ -29,7 +29,7 @@ PROFILES = {
     "hnuit": {
         "school_name": "湖南工业大学",
         "base_url": "https://sdjf.hnuit.edu.cn/prod-api/external",
-        # 设备名形如：72-0914室电表 / 102-0914室水表
+        # 设备名形如：12-0101室电表 / 102-0101室水表
         "dorm_device_name_like": "{building}-%室电表",
         # 楼栋号只校验格式，不写死白名单（工位数 > 999 的学校可放宽）
         "building_pattern": r"^\d{1,3}$",
