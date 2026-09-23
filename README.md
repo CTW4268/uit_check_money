@@ -152,8 +152,17 @@ uit_check_money/
 │   ├── daemon.sh
 │   └── config/
 │       └── example_daemon.ini
-├── import.sql               # 数据库表结构导入文件
-├── IFLOW_old.md             # 项目开发过程（历史文档，不再维护）
+├── data_cleaner/             # 数据清洗/按小时聚合（server 会调用）
+│   └── hourly_report.py
+├── doc/
+│   ├── API_DOC.md            # 接口说明
+│   ├── IFLOW_old.md          # 项目开发过程（历史文档，不再维护）
+│   └── sql/                  # 建表脚本
+│       ├── import.sql        # device + data 两张核心表
+│       ├── email_table.sql   # 邮件订阅表
+│       └── ..._table.sql
+├── start.sh                 # 按需启动（MySQL→采集→后端→前端，不设自启）
+├── stop.sh                  # 停止 start.sh 拉起的进程
 ├── server/                  # Web后端服务
 │   ├── server.py            # RESTful API服务
 │   ├── email_api.py         # 邮件订阅API
@@ -275,6 +284,28 @@ cd web
 ```js
 API_BASE_URL: 'http://127.0.0.1:8080',
 ```
+
+### 7. 一键按需启停（推荐）
+
+`start.sh` / `stop.sh` 把 MySQL、采集、后端、前端串起来，**不注册任何开机自启或常驻服务**，
+关掉即停、需要时再拉起：
+
+```bash
+./start.sh <学号>              # MySQL → 采集一次 → 后端(8080) → 前端(3000)
+./start.sh                    # 只启服务（沿用库里已有数据），不采集
+./start.sh <学号> --no-collect
+./stop.sh                     # 全部停止；也可 ./stop.sh api|web|mysql
+```
+
+端口可用 `PORT_API=8090 PORT_WEB=3001 ./start.sh <学号>` 覆盖；学号只用于当次采集，
+不落盘（也可先 `export UIT_USER=<学号>`）。
+
+**关于采集频率**：`data2sql` 按「结算时间」去重，同一读数重复采集不会新增数据点，
+所以采得再勤既不会灌水、也不会凭空多出曲线点——点是跟着学校那边的结算时间长的。
+需要定时采集/余额预警的话，项目自带两套（都需手动启动）：
+`daemon/daemon.sh`（`rec_time` 秒 + 要执行的命令）和
+`debug_utils/monitor_daemon/monitor_daemon.py`（`while True` 轮询 + SMTP 预警，
+需先填 `config/monitor_config.ini` 与 `config/mail_setting.ini`）。
 
 ## 配置说明
 
