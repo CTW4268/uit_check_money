@@ -63,7 +63,7 @@ md5(n + "DJKSBNW123")
 
 ### 4. 宿管模式（楼栋）改动
 
-* 表名规则：本校是 `102-0914室电表`，三一是 `学1栋101室电表`
+* 表名规则：本校是 `102-0101室电表`，三一是 `学1栋101室电表`
   → 统一交给 `school_profile.dorm_device_name_like` / `parse_building()`；
 * 楼栋列表不再写死：后端新增 `?mode=list_buildings`，按 `device` 表里的设备名实时统计，
   前端 `refreshBuildingButtons()` 动态生成按钮（接口失败则沿用 HTML 里的兜底按钮）；
