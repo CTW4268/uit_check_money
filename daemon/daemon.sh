@@ -3,7 +3,9 @@
 # 读取配置文件并执行命令的守护进程脚本
 
 # 配置文件路径（相对于脚本自身位置）
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+# 注意：readlink -f 是 GNU 扩展，macOS 的 readlink 不支持，会把 SCRIPT_DIR 算成空/相对路径，
+# 导致从仓库根目录执行时找不到 config/daemon.ini（这里改用 POSIX 写法，两个平台都可用）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config/daemon.ini"
 
 # 检查配置文件是否存在

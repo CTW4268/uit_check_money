@@ -319,10 +319,22 @@ API_BASE_URL: 'http://127.0.0.1:8080',
 
 **关于采集频率**：`data2sql` 按「结算时间」去重，同一读数重复采集不会新增数据点，
 所以采得再勤既不会灌水、也不会凭空多出曲线点——点是跟着学校那边的结算时间长的。
-需要定时采集/余额预警的话，项目自带两套（都需手动启动）：
-`daemon/daemon.sh`（`rec_time` 秒 + 要执行的命令）和
+
+**要它按周期自动采集**：用项目自带的 `daemon/daemon.sh`（从仓库根目录执行即可，
+内部按脚本自身位置找配置）：
+
+```bash
+cp daemon/config/example_daemon.ini daemon/config/daemon.ini
+# 编辑 daemon.ini：
+#   rec_time = 3600                                    # 周期，秒
+#   command = '/绝对路径/.venv/bin/python /绝对路径/debug_utils/data2sql/data2sql.py <appUserId> <roleId>'
+bash daemon/daemon.sh      # 手动启动，Ctrl+C 停止（同样不注册开机自启）
+```
+
+需要余额预警的话，项目自带两套（都需手动启动）：
 `debug_utils/monitor_daemon/monitor_daemon.py`（`while True` 轮询 + SMTP 预警，
-需先填 `config/monitor_config.ini` 与 `config/mail_setting.ini`）。
+需先填 `config/monitor_config.ini` 与 `config/mail_setting.ini`）和
+`debug_utils/monitor_aoksender/monitor_aoksender.py`（Aoksend API 方式）。
 
 ## 配置说明
 
