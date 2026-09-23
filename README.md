@@ -244,11 +244,28 @@ python3 debug_utils/get_data.py <appUserId> <roleId>
 
 ### 4. 数据存储
 
-将数据存储到数据库：
+将数据存储到数据库（只入库**自己**的表）：
 
 ```bash
 ./debug_utils/data2sql/data2sql.py <appUserId> <roleId> [pageNum] [pageSize]
 ```
+
+整栋楼批量入库（宿管模式的前提，含电表与水表）：
+
+```bash
+./debug_utils/data2sql/data2sql.py --building 72          # 72 栋全部（实测 260 电表 + 260 水表）
+./debug_utils/data2sql/data2sql.py --building 72 100      # 第二个参数是每页条数
+```
+
+> 用的是 `equipment/list?equipmentName=72-` 前缀过滤（实测该校接口支持），
+> 比扫全院台账（14072 台）快得多，也不会把别的楼数据带进来；每页别超过 100，
+> 实测 pageSize ≥ 1000 时第 3 页起服务端会读超时。
+
+**注意本校设备台账的数据范围**：`equipment/list` 每台只返回**余额**（`remainingBalance`），
+不返回示数（`equipmentCurrentLarge`）、结算时间（`currentDealDate`）和开关状态（`equipmentStatus`）。
+所以整栋楼入库后：余额是真实的，而**用电量（示数差）算不出来**——只有
+`appUserAcct/list`（也就是「自己的表」）才给示数。想按电量监控整栋楼，学校的接口本身不支持，
+能批量看的是余额。
 
 ### 5. 邮件预警
 

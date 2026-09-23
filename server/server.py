@@ -42,7 +42,22 @@ DB_NAME = config.get('mysql', 'db_schema')
 SERVER_PORT = int(config.get('server', 'port'))
 
 # 首页显示配置
+def _s(v):
+    """值转字符串，但 None 保持 None（发 JSON null）。
+
+    原来宿管模式里直接写 str(device_row[7])，数据库里 NULL 会变成字符串 "None"
+    传给前端，前端既认不出 null 也认不出 0，导致整栋楼只剩「有状态那一台」。
+    """
+    return None if v is None else str(v)
+
+
 FIRST_SCREEN_COUNT = int(config.get('config', 'first_screen_count'))
+
+# 可选：首屏固定显示这些设备 id（逗号分隔），一般用来钉住自己宿舍的那几台。
+# 库里只有自己的表时首屏是「随机 6 台」= 全部；一旦入了整栋楼，随机就会挑到别人房间。
+FIRST_SCREEN_DEVICES = [x.strip() for x in
+                        config.get('config', 'first_screen_devices', fallback='').split(',')
+                        if x.strip()]
 
 # 创建线程池
 executor = ThreadPoolExecutor(max_workers=10)
@@ -161,6 +176,11 @@ class DataQuery:
                     cursor.execute(sql, (safe_limit,))
                     results = cursor.fetchall()
                     device_ids = [str(row[0]) for row in results]
+                    if FIRST_SCREEN_DEVICES:
+                        # 配置了固定设备就把它们排在最前面，剩余名额继续用随机结果补足
+                        device_ids = (FIRST_SCREEN_DEVICES
+                                      + [d for d in device_ids if d not in FIRST_SCREEN_DEVICES])[:safe_limit]
+                        print(f"[INFO] 已置顶固定设备: {FIRST_SCREEN_DEVICES}")
                     print(f"[INFO] 查询完成，获取到 {len(device_ids)} 个设备ID")
                     
                     response = {
@@ -485,12 +505,12 @@ class DataQuery:
                         "equipmentName": device_row[1],
                         "device_id": str(did),
                         "installationSite": device_row[2],
-                        "equipmentType": str(device_row[3]),
-                        "ratio": str(device_row[4]),
-                        "rate": str(device_row[5]),
+                        "equipmentType": _s(device_row[3]),
+                        "ratio": _s(device_row[4]),
+                        "rate": _s(device_row[5]),
                         "acctId": device_row[6],
-                        "status": str(device_row[7]),
-                        "updated_at": str(device_row[8]),
+                        "status": _s(device_row[7]),
+                        "updated_at": _s(device_row[8]),
                         "total": len(all_rows),
                         "total_usage": round(total_usage, 4),
                         "rows": all_rows,

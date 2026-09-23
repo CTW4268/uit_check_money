@@ -21,6 +21,7 @@ server/libs/api_client.py
 """
 
 import requests
+import time
 
 from .signer import generate_sign, get_timestamp, md5_encrypt, BASE_URL, DEFAULT_HEADERS, CHANNEL_ID
 from . import school_profile
@@ -254,3 +255,45 @@ def fetch_my_devices(app_user_id: str, role_id: str,
         merged.setdefault("total", len(rows))
         full_rows.append(merged)
     return {"code": 200, "rows": full_rows, "total": len(full_rows)}
+
+
+def fetch_devices_by_building(building: str, page_size: int = 100, role_key: str = None) -> dict:
+    """
+    按楼栋号拉取该楼「全部设备」（电表 + 水表），用于整栋楼入库/宿管模式。
+
+    本校实测：equipment/list 支持 equipmentName 前缀过滤
+        ?roleKey=2&equipmentName=72-&pageNum=1&pageSize=100  ->  total=520（72 栋所有水电表）
+    比扫全院台账（14072 台）快得多，也不会把别的楼的数据带进来。
+
+    注意：pageSize 别开太大，实测 >=1000 时第 3 页起服务端会读超时，默认 100 稳妥。
+
+    Returns:
+        {"code": 200, "rows": [...], "total": n}
+    """
+    prefix = f"{str(building).strip().rstrip('-')}-"
+    role = role_key or _profile_role_key()
+    rows_all, page = [], 1
+    while True:
+        params = {
+            "roleKey": role,
+            "equipmentName": prefix,
+            "pageNum": page,
+            "pageSize": page_size,
+            "channelid": CHANNEL_ID,
+            "timestamp": get_timestamp(),
+        }
+        result = _get(_DEVICE_LIST_URL, params)
+        if result.get("code") not in (200, None):
+            return result
+        rows = result.get("rows") or []
+        if not rows:
+            break
+        rows_all.extend(rows)
+        total = result.get("total") or 0
+        if total and len(rows_all) >= total:
+            break
+        if len(rows) < page_size:
+            break
+        page += 1
+        time.sleep(0.3)   # 别把学校服务器打得太狠
+    return {"code": 200, "rows": rows_all, "total": len(rows_all)}

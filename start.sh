@@ -26,8 +26,18 @@ LOG_DIR="${LOG_DIR:-/tmp}"
 DB_SCHEMA="$(sed -n 's/^db_schema *= *//p' "$ROOT/debug_utils/data2sql/config/mysql.ini" 2>/dev/null | head -1)"
 DB_SCHEMA="${DB_SCHEMA:-uit_check_money}"
 
-USER_ID="${1:-${UIT_USER:-}}"
-NO_COLLECT="${2:-}"
+# 参数解析：把 --no-collect 之类的开关与学号分开，开关放哪个位置都行
+# （原来用 ${1} 当学号、${2} 当开关，于是 `./start.sh --no-collect` 会把开关当成学号）
+USER_ID=""
+NO_COLLECT=""
+for _arg in "$@"; do
+    case "$_arg" in
+        --no-collect) NO_COLLECT="--no-collect" ;;
+        -*)           echo "  未知参数: $_arg（可用: --no-collect）" ;;
+        *)            [ -z "$USER_ID" ] && USER_ID="$_arg" ;;
+    esac
+done
+[ -z "$USER_ID" ] && USER_ID="${UIT_USER:-}"
 
 say() { printf '  %s\n' "$*"; }
 port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }

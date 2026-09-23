@@ -12,7 +12,8 @@ import configparser
 import pymysql
 from datetime import datetime
 
-from libs.api_client import fetch_my_devices as _fetch_device_data
+from libs.api_client import (fetch_my_devices as _fetch_device_data,
+                             fetch_devices_by_building as _fetch_devices_by_building)
 
 
 def load_mysql_config():
@@ -138,16 +139,31 @@ def insert_reading_data(connection, device_data):
 
 
 def main():
-    if len(sys.argv) < 3 or len(sys.argv) > 5:
-        print("用法: ./debug_utils/data2sql/data2sql.py <appUserId> <roleId> [pageNum] [pageSize]")
-        sys.exit(1)
+    args = sys.argv[1:]
+    building = None
+    if '--building' in args:
+        idx = args.index('--building')
+        if idx + 1 >= len(args):
+            print("错误: --building 后面要跟楼栋号，例如 --building 72")
+            sys.exit(1)
+        building = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
 
-    app_user_id = sys.argv[1]
-    role_id = sys.argv[2]
-    page_num = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    page_size = int(sys.argv[4]) if len(sys.argv) > 4 else 100
-
-    print(f"开始处理数据: appUserId={app_user_id}, roleId={role_id}, pageNum={page_num}, pageSize={page_size}")
+    if building:
+        # 整栋楼入库：只需要楼栋号，pageSize 可跟在后面（默认 100）
+        page_size = int(args[0]) if args and args[0].isdigit() else 100
+        print(f"开始按楼栋处理数据: 楼栋={building}, 每页={page_size}（含电表与水表）")
+    else:
+        if len(args) < 2 or len(args) > 4:
+            print("用法: ./debug_utils/data2sql/data2sql.py <appUserId> <roleId> [pageNum] [pageSize]")
+            print("      ./debug_utils/data2sql/data2sql.py --building <楼栋号> [pageSize]")
+            print("        —— 整栋楼入库（电表+水表），宿管模式即可看到整栋")
+            sys.exit(1)
+        app_user_id, role_id = args[0], args[1]
+        page_num = int(args[2]) if len(args) > 2 else 1
+        page_size = int(args[3]) if len(args) > 3 else 100
+        print(f"开始处理数据: appUserId={app_user_id}, roleId={role_id}, "
+              f"pageNum={page_num}, pageSize={page_size}")
 
     try:
         mysql_config = load_mysql_config()
@@ -156,14 +172,17 @@ def main():
         print(f"加载MySQL配置失败: {e}")
         sys.exit(1)
 
-    # 直接调用，不再通过 subprocess
-    # fetch_my_devices 会按学校档案自动选择取数方式：
-    #   三一：equipment/list 按 appUserId 过滤，分页拉取
-    #   本校：appUserAcct/list 取自己的缴费对象 + 逐台补齐设备字段
-    result = _fetch_device_data(app_user_id, role_id, page_num, page_size)
+    if building:
+        # 按 equipmentName 前缀过滤，只取这一栋的设备（实测 72 栋 520 台）
+        result = _fetch_devices_by_building(building, page_size)
+    else:
+        # fetch_my_devices 会按学校档案自动选择取数方式：
+        #   三一：equipment/list 按 appUserId 过滤，分页拉取
+        #   本校：appUserAcct/list 取自己的缴费对象 + 逐台补齐设备字段
+        result = _fetch_device_data(app_user_id, role_id, page_num, page_size)
 
     if not result:
-        print("调用 fetch_my_devices 失败，返回结果为空")
+        print("获取设备数据失败，返回结果为空")
         sys.exit(1)
 
     if result.get('code') != 200:
@@ -176,6 +195,10 @@ def main():
         sys.exit(1)
 
     print(f"获取到 {len(device_data)} 条设备数据")
+    if building:
+        ele = sum(1 for d in device_data if str(d.get('equipmentType')) == '0')
+        water = sum(1 for d in device_data if str(d.get('equipmentType')) == '1')
+        print(f"其中电表 {ele} 台、水表 {water} 台")
 
     connection = connect_database(mysql_config)
     if not connection:

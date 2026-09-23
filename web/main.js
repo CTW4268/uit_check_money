@@ -2181,8 +2181,14 @@ function applyDormFilters() {
     const spikeActive = dormSpikeHours > 0;
 
     dormDataCache.devices.forEach(device => {
-        // 过滤1：状态为关的设备
-        if (dormFilterOffEnabled && device.status !== '1' && device.status !== 1) {
+        // 过滤1：状态为「关」的设备（status = 0）
+        // 注意：status 可能是 null —— 本校设备台账接口只返回余额，不返回开关状态，
+        // 这种「未知」不能当成「已关闭」隐藏，否则整栋楼会只剩自己有状态的那台。
+        const st = device.status;
+        // 兼容老接口可能把 None 序列化成字符串 "None"/"null" 的情况
+        const statusKnown = st !== null && st !== undefined && st !== ''
+            && st !== 'None' && st !== 'null' && st !== 'undefined';
+        if (dormFilterOffEnabled && statusKnown && Number(device.status) !== 1) {
             return;
         }
 
