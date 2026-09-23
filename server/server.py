@@ -6,7 +6,7 @@ import configparser
 import pymysql
 import random
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import sys
 import os
@@ -20,6 +20,9 @@ from contextlib import contextmanager
 
 # 学校档案（宿管模式的楼栋规则随学校不同，集中放在 libs/school_profile.py）
 from libs import school_profile
+
+# 按天用量的抓取/入库（后端自动补数 worker 与命令行脚本共用）
+from libs import usage_backfill as ub
 
 # 导入 data_cleaner 清洗算法
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'data_cleaner'))
@@ -92,6 +95,146 @@ executor = ThreadPoolExecutor(max_workers=10)
 CONNECTION_POOL_SIZE = int(config.get('mysql', 'connection_pool_size', fallback=30))
 connection_pool = Queue(maxsize=CONNECTION_POOL_SIZE)
 connection_lock = threading.Lock()
+
+class BackfillManager:
+    """
+    按天用量的后台自动抓取（单线程 + 限速 + 可中断 + 进度可查）。
+
+    为什么放后端跑：本校的曲线接口永久超时，按天数据只能「一台设备一天一次请求」，
+    整栋楼 30 天是几千次请求，不能在 HTTP 请求里同步跑完；所以丢进后台线程，
+    前端轮询 backfill_status 看进度，跑完自动刷新表格。
+    已入库的 (设备, 日期) 会跳过，所以中断/重启后是接着补。
+    """
+
+    def __init__(self):
+        # 必须是可重入锁：start() 持锁时会顺带取状态，普通 Lock 会直接死锁
+        self._lock = threading.RLock()
+        self._thread = None
+        self._stop = threading.Event()
+        self.state = {
+            "running": False, "cancelled": False, "building": None, "days": 0,
+            "start_day": None, "end_day": None, "total": 0, "done": 0,
+            "ok": 0, "fail": 0, "elapsed": 0, "started_at": None,
+            "finished_at": None, "last_error": None, "device_count": 0,
+        }
+
+    # ---------- 对外 ----------
+    def status(self):
+        with self._lock:
+            st = dict(self.state)
+        st["eta_seconds"] = None
+        if st["running"] and st["done"] > 0 and st["total"] > st["done"]:
+            per = st["elapsed"] / st["done"]
+            st["eta_seconds"] = int(per * (st["total"] - st["done"]))
+        return st
+
+    def start(self, building, days=30, kinds=("electric",)):
+        """kinds: electric / water / both；已有任务在跑就直接返回当前状态。"""
+        with self._lock:
+            if self.state["running"]:
+                busy = True
+            else:
+                busy = False
+                self._stop.clear()
+                self.state.update({
+                    "running": True, "cancelled": False, "building": str(building),
+                    "days": int(days), "start_day": None, "end_day": None,
+                    "total": 0, "done": 0, "ok": 0, "fail": 0, "elapsed": 0,
+                    "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "finished_at": None, "last_error": None, "device_count": 0,
+                })
+        if busy:
+            # 注意：状态查询要放在锁外面（即使锁可重入，也别在持有锁时做别的事）
+            return {"started": False, "reason": "已有补数任务在跑", **self.status()}
+        t = threading.Thread(target=self._run, args=(str(building), int(days), tuple(kinds)),
+                             daemon=True, name="usage-backfill")
+        self._thread = t
+        t.start()
+        return {"started": True, **self.status()}
+
+    def stop(self):
+        self._stop.set()
+        return {"stopping": True, **self.status()}
+
+    # ---------- 内部 ----------
+    @staticmethod
+    def _devices(building, kinds):
+        """从库里取设备（不额外打接口）：电表 equipmentType=0，水表=1。"""
+        like = school_profile.dorm_device_like(building).replace("电表", "%表")
+        want = []
+        if "electric" in kinds or "both" in kinds:
+            want.append("0")
+        if "water" in kinds or "both" in kinds:
+            want.append("1")
+        conn = DatabaseManager.create_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM device WHERE equipmentName LIKE %s "
+                    "AND (%s) ORDER BY equipmentName" %
+                    ("%s", " OR ".join(["equipmentType = %s"] * len(want))),
+                    [like] + want)
+                return [str(r[0]) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def _run(self, building, days, kinds):
+        conn = None
+        try:
+            device_ids = self._devices(building, kinds)
+            day_list = ub.last_n_days(days)
+            with self._lock:
+                self.state.update({"device_count": len(device_ids),
+                                   "start_day": day_list[0], "end_day": day_list[-1]})
+            print(f"[backfill] 楼栋 {building} 设备 {len(device_ids)} 台 × {len(day_list)} 天 "
+                  f"({day_list[0]} ~ {day_list[-1]})")
+
+            if not device_ids:
+                with self._lock:
+                    self.state.update({"last_error": "库里没有该楼栋的设备，先跑 data2sql 采集台账",
+                                       "running": False, "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                return
+
+            conn = DatabaseManager.create_connection()
+            ub.ensure_table(conn)
+            jobs = ub.missing_jobs(conn, device_ids, day_list[0], day_list[-1])
+            with self._lock:
+                self.state["total"] = len(jobs)
+            print(f"[backfill] 需要补 {len(jobs)} 条（已存在的会跳过）")
+
+            def on_progress(st):
+                with self._lock:
+                    self.state.update({"done": st["done"], "ok": st["ok"],
+                                       "fail": st["fail"], "elapsed": st["elapsed"],
+                                       "last_error": st["last_error"]})
+                if st["done"] % 50 == 0:
+                    print(f"[backfill] 进度 {st['done']}/{st['total']} 成功 {st['ok']} 失败 {st['fail']}")
+
+            stats = ub.run_jobs(conn, jobs, pace=0.3, on_progress=on_progress,
+                                should_stop=self._stop.is_set)
+            with self._lock:
+                self.state.update({"ok": stats["ok"], "fail": stats["fail"],
+                                   "done": stats["done"], "elapsed": stats["elapsed"],
+                                   "cancelled": bool(stats.get("stopped")),
+                                   "last_error": stats.get("last_error")})
+            print(f"[backfill] 结束：成功 {stats['ok']} 失败 {stats['fail']} 用时 {stats['elapsed']} 秒")
+        except Exception as e:
+            traceback.print_exc()
+            with self._lock:
+                self.state["last_error"] = f"{type(e).__name__}: {e}"
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            with self._lock:
+                self.state["running"] = False
+                self.state["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+backfill_manager = BackfillManager()
+
 
 class DatabaseManager:
     @staticmethod
@@ -432,6 +575,58 @@ class DataQuery:
                      for b, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
         print(f"[INFO] 楼栋列表统计完成，共 {len(buildings)} 个楼栋")
         return {"code": 200, "buildings": buildings}
+
+    @staticmethod
+    def get_device_daily(device_id, days=30):
+        """
+        单台设备的按天用量序列（来自 usage_daily），给统计表格「点寝室展开看日线」用。
+        """
+        print(f"[INFO] 查询按天用量，设备: {device_id}, 天数: {days}")
+        try:
+            since = (datetime.now().date() - timedelta(days=int(days))).isoformat()
+            series, dev, latest, has_usage = [], None, None, False
+            with DatabaseManager.get_connection() as conn:
+                has_usage = ub.table_exists(conn)
+                if has_usage:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT day, usage_amount, use_money FROM usage_daily "
+                            "WHERE device_id = %s AND day >= %s ORDER BY day",
+                            (str(device_id), since))
+                        rows = cursor.fetchall()
+                        cursor.execute("SELECT equipmentName, equipmentType, rate FROM device "
+                                       "WHERE id = %s", (str(device_id),))
+                        dev = cursor.fetchone()
+                        cursor.execute("SELECT remainingBalance, read_time FROM data "
+                                       "WHERE device_id = %s ORDER BY read_time DESC LIMIT 1",
+                                       (str(device_id),))
+                        latest = cursor.fetchone()
+                    series = [{"day": str(r[0]),
+                               "usage": float(r[1]) if r[1] is not None else None,
+                               "money": float(r[2]) if r[2] is not None else None}
+                              for r in rows]
+            vals = [x["usage"] for x in series if x["usage"] is not None]
+            return {
+                "code": 200,
+                "device_id": str(device_id),
+                "name": dev[0] if dev else None,
+                "kind": ("电" if dev and str(dev[1]) == "0" else "水" if dev else None),
+                "rate": float(dev[2]) if dev and dev[2] is not None else None,
+                "balance": float(latest[0]) if latest and latest[0] is not None else None,
+                "last_time": str(latest[1]) if latest and latest[1] else None,
+                "days": int(days), "since": since,
+                "has_usage_table": has_usage,
+                "point_count": len(series),
+                "usage_sum": round(sum(vals), 4) if vals else None,
+                "usage_avg": round(sum(vals) / len(vals), 4) if vals else None,
+                "usage_max": max(vals) if vals else None,
+                "usage_min": min(vals) if vals else None,
+                "series": series,
+            }
+        except Exception as e:
+            print(f"[ERROR] 按天用量查询失败: {e}")
+            traceback.print_exc()
+            return {"code": "500", "error": f"按天用量查询失败: {str(e)}"}
 
     @staticmethod
     def get_stats_table(building, days=30):
@@ -786,6 +981,40 @@ class RequestHandler(BaseHTTPRequestHandler):
                 else:
                     print("[WARN] 缺少必要参数 building, start_day 或 end_day")
                     response_data = {"code": "400", "error": "缺少必要参数 building, start_day 或 end_day"}
+            elif mode == 'backfill_status':
+                response_data = backfill_manager.status()
+
+            elif mode == 'backfill_start':
+                building = params.get('building', [None])[0]
+                days_raw = params.get('days', ['30'])[0]
+                kinds_raw = (params.get('kinds', ['electric'])[0] or 'electric').lower()
+                kinds = ('electric', 'water') if kinds_raw == 'both' else \
+                        (('electric',) if kinds_raw == 'electric' else ('water',))
+                if not building or not re.match(school_profile.get("building_pattern"), building):
+                    response_data = {"code": "400", "error": f"无效的楼栋号: {building}"}
+                else:
+                    try:
+                        days_int = max(1, min(int(days_raw), 3650))
+                    except (TypeError, ValueError):
+                        days_int = 30
+                    r = backfill_manager.start(building, days_int, kinds)
+                    response_data = {"code": 200, **r}
+
+            elif mode == 'backfill_stop':
+                response_data = {"code": 200, **backfill_manager.stop()}
+
+            elif mode == 'device_daily':
+                device_id = params.get('device_id', [None])[0]
+                days_raw = params.get('days', ['30'])[0]
+                try:
+                    days_int = max(1, min(int(days_raw), 3650))
+                except (TypeError, ValueError):
+                    days_int = 30
+                if not device_id:
+                    response_data = {"code": "400", "error": "缺少 device_id"}
+                else:
+                    response_data = DataQuery.get_device_daily(device_id, days_int)
+
             elif mode == 'stats_table':
                 # 统计表格：按楼层分类、按寝室号排序（format=csv 直接下载表格文件）
                 building = params.get('building', [None])[0]
@@ -800,7 +1029,23 @@ class RequestHandler(BaseHTTPRequestHandler):
                         days_int = max(1, min(int(days_raw), 3650))
                     except (TypeError, ValueError):
                         days_int = 30
+                    # 自动补按天用量（后端 worker 跑，前端轮询 backfill_status 看进度）
+                    auto = (params.get('auto_backfill', ['1'])[0] or '1') != '0'
+                    backfill_info = None
+                    if auto and fmt == 'json':
+                        kinds_raw = (params.get('kinds', ['electric'])[0] or 'electric').lower()
+                        kinds = ('electric', 'water') if kinds_raw == 'both' else \
+                                (('electric',) if kinds_raw == 'electric' else ('water',))
+                        try:
+                            backfill_info = backfill_manager.start(building, days_int, kinds)
+                            if backfill_info.get('started'):
+                                print(f"[INFO] 已触发按天用量自动补数：{building}栋 {days_int}天 {kinds}")
+                        except Exception as e:
+                            print(f"[WARN] 触发自动补数失败: {e}")
+                            backfill_info = {"error": str(e)}
                     result = DataQuery.get_stats_table(building, days_int)
+                    if result.get('code') == 200 and backfill_info is not None:
+                        result['backfill'] = backfill_info
                     if fmt == 'csv' and result.get('code') == 200:
                         response_data = {"__csv__": stats_table_to_csv(result),
                                          "__filename__": f"stats_building{building}_{days_int}d.csv"}
@@ -863,6 +1108,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 # 启动服务器
 if __name__ == '__main__':
-    server = HTTPServer(('', SERVER_PORT), RequestHandler)
+    # 多线程模式：一个慢请求（大表查询/补数触发）不会把整个服务堵住
+    server = ThreadingHTTPServer(('', SERVER_PORT), RequestHandler)
+    server.daemon_threads = True
     print(f"服务器启动，监听端口 {SERVER_PORT}")
     server.serve_forever()

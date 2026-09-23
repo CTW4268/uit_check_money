@@ -323,41 +323,56 @@ API_BASE_URL: 'http://127.0.0.1:8080',
 
 面板顶部新增「统计表格」页签：选楼栋 + 天数 → 生成，即可看到整栋楼按**楼层分组**、楼层内按**寝室号排序**的表格，
 列包含 楼层 / 寝室 / 类型 / 余额 / 近 N 天用量 / 单价 / 最近更新时间；余额 ≤ 10 元标红。
+**点任意一行可展开该寝室的每日日线**（SVG 折线 + 合计/日均/最高 + 最近 7 天明细）。
 支持导出 CSV（`导出 CSV` 导当前楼栋、`导出全部楼栋 CSV` 逐栋下载），文件带 BOM，Excel 直接打开不乱码。
+
+打开表格时**后端会自动开始补按天用量**（见 8.2），表格顶部显示实时进度条（`完成数/总数 · 成功 · 失败 · 预计还需`），
+补完自动刷新表格，用量列随之填上；不用手工跑脚本。
 
 后端接口：
 
 ```
-GET /?mode=stats_table&building=72&days=30            # JSON（按楼层分组）
+GET /?mode=stats_table&building=72&days=30            # JSON（按楼层分组，默认顺带触发自动补数）
+GET /?mode=stats_table&building=72&days=30&auto_backfill=0   # 只要表格、不触发补数
 GET /?mode=stats_table&building=72&days=30&format=csv # CSV 下载
+GET /?mode=backfill_start&building=72&days=30&kinds=electric|water|both  # 手动触发补数
+GET /?mode=backfill_status                            # 补数进度（running/done/total/eta_seconds…）
+GET /?mode=backfill_stop                              # 优雅停止（已抓到的都留着）
+GET /?mode=device_daily&device_id=6166&days=30        # 单台设备的每日序列（展开日线用）
 ```
 
 楼层 / 寝室号从设备名解析（见 `server/libs/school_profile.py` 的 `room_name_pattern` / `parse_room()`）：
 本校 `72-0101室电表` → 1 楼、0101 室（寝室号前两位是楼层）；命名规则不同的学校只需改档案里的正则。
 
-#### 8.1 按天用量回填（前 N 天）
+#### 8.1 按天用量回填（前 N 天，后端自动）
+
+**不用手工跑**：打开面板「统计表格」页签就会自动开始（后端 `BackfillManager` 后台线程跑，前端轮询进度）。
+想用命令行或指定区间时：
 
 ```
 ./debug_utils/daily_backfill.py --device 6166 --days 30        # 单台
 ./debug_utils/daily_backfill.py --mine <学号> --days 30        # 自己名下的表
-./debug_utils/daily_backfill.py --building 72 --days 30 --only-electric --yes   # 整栋（注意请求量）
+./debug_utils/daily_backfill.py --building 72 --days 30 --only-electric    # 整栋
+./debug_utils/daily_backfill.py --device 6166 --start 2026-08-24 --end 2026-09-23
 ```
 
-结果写进 `usage_daily` 表（一次跑完可中断续跑，已存在的 (设备,日期) 会跳过）。
+抓取逻辑与后端共用 `server/libs/usage_backfill.py`；结果写进 `usage_daily` 表。
+已存在的 (设备,日期) 会跳过，**可随时中断/重启后接着补**（进度即数据，不需要额外状态文件）。
+连续失败 15 次会自动停下（避免对方限流时继续硬打）。
 
 **为什么是一天一次请求：** 本校部署上的能耗曲线接口 `/external/bill/getUsageListByNodeId` 长期无响应
 （每次都是网关超时，东八区工作日/晚间都试过），能用的只有 `POST /external/bill`，而它只返回**某个区间**的
 合计（`totalUsage` / `lastDayUsage` / `lastTwoDayUsage`），没有日序列。所以按天数据只能一天发一次请求换来。
 
-**请求量 = 设备数 × 天数**，实测单次约 2 秒：
+**请求量 = 设备数 × 天数**，实测单次约 0.7 秒（后台 worker 默认每次之间停 0.3 秒，别把学校服务器打太急）：
 
 | 范围 | 请求数 | 约需时间 |
 | --- | --- | --- |
 | 自己 1 台 × 30 天 | 30 | 1 分钟 |
-| 整栋 260 台电表 × 30 天 | 7800 | 4 小时以上 |
-| 整栋 260 台电表 × 1 次（当月合计） | 260 | 约 10 分钟 |
+| 整栋 260 台电表 × 30 天 | 7800 | 约 2.5 小时（后台自动跑，不用管） |
+| 整栋 520 台（电+水）× 30 天 | 15600 | 约 5 小时 |
 
-超过 60 次请求脚本会先停下要你加 `--yes`，避免不小心给学校服务器压力。
+请求量只在日志里提示，不再拦截。
 
 > 正确性校验：逐日回填的 30 天合计（241.66）与直接查整月区间的 `totalUsage`（241.66）完全一致。
 

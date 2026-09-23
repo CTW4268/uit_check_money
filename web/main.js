@@ -2274,8 +2274,9 @@ function renderStatsTable(data) {
     }
     const days = data.days;
     let html = `<div class="stats-summary">${data.building}栋 · 共 ${data.total} 台 · ${data.floor_count} 个楼层 · 近 ${days} 天（${data.since} 起）`
-        + (data.has_usage_table ? '' : ' · 尚未回填按天用量（跑 debug_utils/daily_backfill.py）')
-        + `<br><span class="muted">按楼层分类、楼层内按寝室号排序；余额标红表示 ≤ 10 元</span></div>`;
+        + (data.has_usage_table ? '' : ' · 用量表还没建（后端首次补数时自动建）')
+        + `<br><span class="muted">按楼层分类、楼层内按寝室号排序；余额标红表示 ≤ 10 元；<b>点任意一行可展开看它的每日日线</b></span>`
+        + `<div class="stats-backfill" id="stats-backfill-bar"></div></div>`;
     html += '<table class="stats-table"><thead><tr>'
         + '<th>楼层</th><th>寝室</th><th>类型</th><th>余额(元)</th>'
         + `<th>近${days}天用量</th><th>单价</th><th>最近更新</th></tr></thead><tbody>`;
@@ -2287,17 +2288,131 @@ function renderStatsTable(data) {
             const lowCls = (r.balance !== null && r.balance !== undefined && Number(r.balance) <= 10) ? ' low-balance' : '';
             const use = (r.usage_sum === null || r.usage_sum === undefined) ? '—' : Number(r.usage_sum).toFixed(2);
             const rate = (r.rate === null || r.rate === undefined) ? '—' : Number(r.rate).toFixed(4);
-            html += `<tr><td>${f.floor === null || f.floor === undefined ? '' : f.floor}</td>`
+            html += `<tr class="room-row" data-device-id="${r.device_id}" data-device-name="${(r.equipmentName || '').replace(/"/g, '&quot;')}">`
+                + `<td>${f.floor === null || f.floor === undefined ? '' : f.floor}</td>`
                 + `<td>${r.room ? r.room + ' 室' : (r.equipmentName || '')}</td>`
                 + `<td>${r.kind || ''}</td>`
                 + `<td class="num${lowCls}">${bal}</td>`
                 + `<td class="num">${use}</td>`
                 + `<td class="num">${rate}</td>`
-                + `<td>${r.last_time ? String(r.last_time).slice(0, 16) : '—'}</td></tr>`;
+                + `<td>${r.last_time ? String(r.last_time).slice(0, 16) : '—'}</td></tr>`
+                + `<tr class="detail-row" data-detail-for="${r.device_id}" style="display:none;"><td colspan="7"></td></tr>`;
         });
     });
     html += '</tbody></table>';
     box.innerHTML = html;
+
+    // 行点击 → 展开每日日线（首次展开才请求）
+    if (!box.dataset.delegated) {
+        box.dataset.delegated = '1';
+        box.addEventListener('click', (ev) => {
+            const tr = ev.target.closest('tr.room-row');
+            if (!tr) return;
+            const id = tr.getAttribute('data-device-id');
+            const dr = box.querySelector(`tr.detail-row[data-detail-for="${id}"]`);
+            if (!dr) return;
+            const cell = dr.querySelector('td');
+            if (dr.style.display !== 'none') { dr.style.display = 'none'; return; }
+            dr.style.display = '';
+            if (dr.dataset.loaded === '1') return;
+            dr.dataset.loaded = '1';
+            cell.innerHTML = '<div class="stats-empty">正在取该寝室的每日用量…</div>';
+            fetchWithTimeout(`${getApiUrl('main')}/?mode=device_daily&device_id=${encodeURIComponent(id)}&days=${statsDays()}`,
+                             { timeout: 60000 })
+                .then(r => r.json())
+                .then(d => { cell.innerHTML = renderDeviceDaily(d); })
+                .catch(e => { cell.innerHTML = `<div class="stats-empty">取日线失败：${e.message || e}</div>`; });
+        });
+    }
+
+    updateBackfillBar(data.backfill);
+    if (data.backfill && data.backfill.running) startBackfillPoll();
+}
+
+function statsDays() {
+    const el = document.getElementById('stats-days');
+    return (el && el.value) ? parseInt(el.value, 10) : 30;
+}
+
+function fmtEta(sec) {
+    if (!sec && sec !== 0) return '—';
+    const m = Math.floor(sec / 60), h = Math.floor(m / 60);
+    if (h > 0) return `${h} 小时 ${m % 60} 分`;
+    if (m > 0) return `${m} 分钟`;
+    return `${sec} 秒`;
+}
+
+function updateBackfillBar(bf) {
+    const bar = document.getElementById('stats-backfill-bar');
+    if (!bar) return;
+    if (!bf || (!bf.running && !bf.total)) {
+        bar.innerHTML = '';
+        return;
+    }
+    const total = bf.total || 0, done = bf.done || 0;
+    const pct = total ? Math.min(100, Math.round(done * 100 / total)) : 0;
+    const state = bf.running ? '正在补数' : (bf.cancelled ? '已中断（可再点「生成表格」接着补）' : '补数完成');
+    bar.innerHTML = `<span class="bf-state">${state}</span> `
+        + `<span class="bf-bar"><i style="width:${pct}%"></i></span> `
+        + `<span class="muted">${done}/${total}（${pct}%）· 成功 ${bf.ok || 0} · 失败 ${bf.fail || 0}`
+        + (bf.running ? ` · 预计还需 ${fmtEta(bf.eta_seconds)}` : '')
+        + (bf.last_error ? ` · ${bf.last_error}` : '')
+        + `</span>`;
+}
+
+let statsBackfillTimer = null;
+
+function startBackfillPoll() {
+    if (statsBackfillTimer) return;
+    statsBackfillTimer = setInterval(async () => {
+        try {
+            const r = await fetchWithTimeout(`${getApiUrl('main')}/?mode=backfill_status`, { timeout: 20000 });
+            const st = await r.json();
+            updateBackfillBar(st);
+            if (!st.running) {
+                clearInterval(statsBackfillTimer);
+                statsBackfillTimer = null;
+                console.log('按天补数结束，刷新表格');
+                loadStatsTable();     // 补完后自动把用量列刷出来
+            }
+        } catch (e) {
+            console.warn('补数进度查询失败:', e);
+        }
+    }, 8000);
+}
+
+// 单台设备的每日日线：SVG 折线 + 关键指标 + 最近几天明细
+function renderDeviceDaily(d) {
+    if (!d || d.code !== 200) {
+        return `<div class="stats-empty">没有该设备的按天数据${d && d.error ? '：' + d.error : ''}</div>`;
+    }
+    const s = d.series || [];
+    if (!s.length) {
+        return `<div class="stats-empty">${d.name || d.device_id} 还没有按天数据（后端补数进行中时稍后再点开）</div>`;
+    }
+    const vals = s.map(x => (x.usage === null || x.usage === undefined) ? 0 : Number(x.usage));
+    const max = Math.max(...vals, 0.0001);
+    const W = 640, H = 110, PAD = 4;
+    const pts = vals.map((v, i) => {
+        const x = PAD + (W - 2 * PAD) * (vals.length === 1 ? 0.5 : i / (vals.length - 1));
+        const y = H - PAD - (H - 2 * PAD) * (v / max);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    let html = `<div class="daily-detail"><div class="daily-head">`
+        + `<b>${d.name || d.device_id}</b> · ${d.kind || ''}表 · 单价 ${d.rate === null || d.rate === undefined ? '—' : d.rate}`
+        + ` · 余额 ${d.balance === null || d.balance === undefined ? '—' : Number(d.balance).toFixed(2)} 元`
+        + ` · 近 ${d.days} 天合计 <b>${d.usage_sum === null ? '—' : Number(d.usage_sum).toFixed(2)}</b>`
+        + `（日均 ${d.usage_avg === null ? '—' : Number(d.usage_avg).toFixed(2)}，最高 ${d.usage_max === null ? '—' : Number(d.usage_max).toFixed(2)}）`
+        + ` · 数据点 ${d.point_count} 天</div>`;
+    html += `<svg class="daily-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
+        + `<polyline points="${pts}" fill="none" stroke="#2196F3" stroke-width="2"/></svg>`;
+    html += `<div class="daily-axis"><span>${s[0].day}</span>`
+        + `<span class="muted">纵轴上限 ${max.toFixed(2)}</span>`
+        + `<span>${s[s.length - 1].day}</span></div>`;
+    html += '<div class="daily-list">' + s.slice(-7).reverse().map(x =>
+        `<span>${x.day}：<b>${x.usage === null || x.usage === undefined ? '—' : Number(x.usage).toFixed(2)}</b></span>`
+    ).join('') + ' <span class="muted">（最近 7 天）</span></div>';
+    return html + '</div>';
 }
 
 async function loadStatsTable() {
