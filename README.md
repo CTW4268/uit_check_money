@@ -319,6 +319,52 @@ cd web
 API_BASE_URL: 'http://127.0.0.1:8080',
 ```
 
+### 8. 统计表格（按楼层分类、按寝室号排序）
+
+面板顶部新增「统计表格」页签：选楼栋 + 天数 → 生成，即可看到整栋楼按**楼层分组**、楼层内按**寝室号排序**的表格，
+列包含 楼层 / 寝室 / 类型 / 余额 / 近 N 天用量 / 单价 / 最近更新时间；余额 ≤ 10 元标红。
+支持导出 CSV（`导出 CSV` 导当前楼栋、`导出全部楼栋 CSV` 逐栋下载），文件带 BOM，Excel 直接打开不乱码。
+
+后端接口：
+
+```
+GET /?mode=stats_table&building=72&days=30            # JSON（按楼层分组）
+GET /?mode=stats_table&building=72&days=30&format=csv # CSV 下载
+```
+
+楼层 / 寝室号从设备名解析（见 `server/libs/school_profile.py` 的 `room_name_pattern` / `parse_room()`）：
+本校 `72-0101室电表` → 1 楼、0101 室（寝室号前两位是楼层）；命名规则不同的学校只需改档案里的正则。
+
+#### 8.1 按天用量回填（前 N 天）
+
+```
+./debug_utils/daily_backfill.py --device 6166 --days 30        # 单台
+./debug_utils/daily_backfill.py --mine <学号> --days 30        # 自己名下的表
+./debug_utils/daily_backfill.py --building 72 --days 30 --only-electric --yes   # 整栋（注意请求量）
+```
+
+结果写进 `usage_daily` 表（一次跑完可中断续跑，已存在的 (设备,日期) 会跳过）。
+
+**为什么是一天一次请求：** 本校部署上的能耗曲线接口 `/external/bill/getUsageListByNodeId` 长期无响应
+（每次都是网关超时，东八区工作日/晚间都试过），能用的只有 `POST /external/bill`，而它只返回**某个区间**的
+合计（`totalUsage` / `lastDayUsage` / `lastTwoDayUsage`），没有日序列。所以按天数据只能一天发一次请求换来。
+
+**请求量 = 设备数 × 天数**，实测单次约 2 秒：
+
+| 范围 | 请求数 | 约需时间 |
+| --- | --- | --- |
+| 自己 1 台 × 30 天 | 30 | 1 分钟 |
+| 整栋 260 台电表 × 30 天 | 7800 | 4 小时以上 |
+| 整栋 260 台电表 × 1 次（当月合计） | 260 | 约 10 分钟 |
+
+超过 60 次请求脚本会先停下要你加 `--yes`，避免不小心给学校服务器压力。
+
+> 正确性校验：逐日回填的 30 天合计（241.66）与直接查整月区间的 `totalUsage`（241.66）完全一致。
+
+**建表注意：** `usage_daily` 的排序规则必须是 `utf8mb4_general_ci`（与 `device`/`data` 一致）。
+MySQL 26.7 默认建表是 `utf8mb4_0900_ai_ci`，与旧表 join 会报 `1267 Illegal mix of collations`；
+`doc/sql/usage_daily_table.sql` 已显式指定，`daily_backfill.py` 也会自动检查并改正。
+
 ### 7. 一键按需启停（推荐）
 
 `start.sh` / `stop.sh` 把 MySQL、采集、后端、前端串起来，**不注册任何开机自启或常驻服务**，

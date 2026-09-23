@@ -38,6 +38,8 @@ PROFILES = {
         "dorm_buildings": ["102", "105", "104", "101", "91", "57", "17"],
         # 按设备 id 精确查单台设备的接口路径（前端设备页用的就是这个双 equipment 路径）
         "equipment_by_id_path": "/equipment/equipment/list",
+        # 从设备名解析 楼栋/寝室号 的正则（用于按楼层分类、按寝室号排序）
+        "room_name_pattern": r"^(?P<building>\d+)-(?P<room>\d+)室(?P<kind>[电水])表$",
         # equipment/list 是否会按 appUserId 过滤：本校实测**不会**（会返回学院全部台账），
         # 所以取「自己的设备」要走 appUserAcct/list + 逐台补齐字段
         "device_list_scoped_by_user": False,
@@ -60,6 +62,8 @@ PROFILES = {
         "building_pattern": r"^(1|2|3|5|6|7|8|9|10)$",
         "dorm_buildings": ["1", "2", "3", "5", "6", "7", "8", "9", "10"],
         "equipment_by_id_path": "/equipment/list",
+        # 原版命名：学1栋101室电表
+        "room_name_pattern": r"^学(?P<building>\d+)栋(?P<room>\d+)室(?P<kind>[电水])表$",
         # 三一：equipment/list 按 appUserId 过滤，直接分页拉取即可
         "device_list_scoped_by_user": True,
         "role_key": "2",
@@ -115,3 +119,37 @@ def parse_building(device_name):
     """从设备名里解析出楼栋前缀；不匹配返回 None。"""
     match = building_prefix_regex().match(device_name or "")
     return match.group(1) if match else None
+
+
+_ROOM_RE_CACHE = {}
+
+
+def parse_room(device_name):
+    """
+    从设备名解析楼栋 / 楼层 / 寝室号，供「按楼层分类、按寝室号排序」使用。
+
+        "72-0101室电表" -> {"building": "72", "room": "0101", "room_no": 101,
+                            "floor": 1, "kind": "电"}
+        "学1栋101室电表" -> {"building": "1", "room": "101", "room_no": 101,
+                             "floor": None, "kind": "电"}
+
+    规则：寝室号前两位是楼层（1204 -> 12 楼）；不足 4 位时楼层为 None。
+    名字不符合本校命名规则时返回 None。
+    """
+    pattern = get("room_name_pattern")
+    if not pattern:
+        return None
+    if pattern not in _ROOM_RE_CACHE:
+        _ROOM_RE_CACHE[pattern] = re.compile(pattern)
+    m = _ROOM_RE_CACHE[pattern].match(device_name or "")
+    if not m:
+        return None
+    room = m.group("room")
+    floor = int(room[:-2]) if len(room) > 2 else None
+    return {
+        "building": m.group("building"),
+        "room": room,
+        "room_no": int(room),
+        "floor": floor,
+        "kind": m.group("kind"),
+    }

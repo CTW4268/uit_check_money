@@ -1495,3 +1495,63 @@ body.dark-mode .missingdata-tag {
         grid-template-columns: 1fr;
     }
 }
+
+/* ===== 统计表格（按楼层分类 / 按寝室号排序） ===== */
+.stats-table-container {
+    margin-top: 16px;
+    max-height: 70vh;
+    overflow: auto;
+    border: 1px solid var(--data-table-border, #444);
+    border-radius: 8px;
+}
+
+.stats-summary {
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--text-color);
+    background-color: var(--data-table-header-bg, #444);
+    border-bottom: 1px solid var(--data-table-border, #444);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+
+.stats-empty { padding: 24px; text-align: center; color: var(--muted-color, #999); }
+
+.stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.stats-table th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background-color: var(--data-table-header-bg, #444);
+    color: var(--text-color);
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--data-table-border, #555);
+    white-space: nowrap;
+}
+
+.stats-table td {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--data-table-border, #333);
+    color: var(--text-color);
+    white-space: nowrap;
+}
+
+.stats-table tbody tr:hover td { background-color: rgba(33, 150, 243, 0.10); }
+
+.stats-table tr.floor-row td {
+    background-color: rgba(33, 150, 243, 0.18);
+    font-weight: 600;
+    position: sticky;
+    top: 34px;
+    z-index: 1;
+}
+
+.stats-table td.low-balance { color: #ff6b6b; font-weight: 600; }
+.stats-table td.num { text-align: right; font-variant-numeric: tabular-nums; }

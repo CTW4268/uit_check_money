@@ -22,6 +22,7 @@
                     <div class="tab active" data-tab="data-count">数据量</div>
                     <div class="tab" data-tab="data-mode">数据解析</div>
                     <div class="tab" data-tab="dorm-mode">宿管模式</div>
+                    <div class="tab" data-tab="stats-table">统计表格</div>
                 </div>
             </div>
             
@@ -128,6 +129,26 @@
                         </div>
                     </div>
                     <button id="dorm-query-btn">查询</button>
+                </div>
+            </div>
+
+            <!-- 统计表格选项卡内容：按楼层分类、按寝室号排序 -->
+            <div class="tab-pane" id="stats-table-pane">
+                <div class="dorm-controls">
+                    <div class="control-group">
+                        <label>楼栋:</label>
+                        <select id="stats-building"></select>
+                    </div>
+                    <div class="control-group">
+                        <label>统计天数:</label>
+                        <input type="number" id="stats-days" value="30" min="1" max="3650" step="1">
+                    </div>
+                    <button id="stats-query-btn">生成表格</button>
+                    <button id="stats-export-btn">导出 CSV</button>
+                    <button id="stats-export-all-btn">导出全部楼栋 CSV</button>
+                </div>
+                <div class="stats-table-container" id="stats-table-container">
+                    <div class="stats-empty">选楼栋和天数后点「生成表格」</div>
                 </div>
             </div>
         </div>

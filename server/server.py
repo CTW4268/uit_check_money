@@ -42,6 +42,32 @@ DB_NAME = config.get('mysql', 'db_schema')
 SERVER_PORT = int(config.get('server', 'port'))
 
 # 首页显示配置
+def stats_table_to_csv(result):
+    """把统计表格结果转成 CSV 文本（带 BOM，Excel 直接打开不乱码）。"""
+    import csv as _csv
+    import io as _io
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator='\n')
+    days = result.get('days', 30)
+    w.writerow(["楼层", "寝室号", "类型", "设备名", "安装位置", "单价", "余额",
+                f"近{days}天用量", f"近{days}天有数据天数", "最近更新时间", "设备id"])
+    for d in result.get("devices", []):
+        w.writerow([
+            "" if d.get("floor") is None else d["floor"],
+            d.get("room") or "",
+            d.get("kind") or "",
+            d.get("equipmentName") or "",
+            d.get("installationSite") or "",
+            "" if d.get("rate") is None else d["rate"],
+            "" if d.get("balance") is None else d["balance"],
+            "" if d.get("usage_sum") is None else d["usage_sum"],
+            d.get("usage_days", 0),
+            d.get("last_time") or "",
+            d.get("device_id") or "",
+        ])
+    return buf.getvalue()
+
+
 def _s(v):
     """值转字符串，但 None 保持 None（发 JSON null）。
 
@@ -408,6 +434,108 @@ class DataQuery:
         return {"code": 200, "buildings": buildings}
 
     @staticmethod
+    def get_stats_table(building, days=30):
+        """
+        统计表格：该楼设备清单 + 最新余额 + 近 N 天用量，按「楼层 → 寝室号 → 表类型」排序，
+        并按楼层分组返回，供前端表格（按楼层分类、按寝室号排序）直接渲染。
+
+        数据来源：device（设备清单）+ data（最新一条读数 = 余额/时间）
+                  + usage_daily（近 N 天每日用量之和，由 debug_utils/daily_backfill.py 回填）。
+        usage_daily 表不存在时不影响，只是用量列会是空。
+        """
+        print(f"[INFO] 生成统计表格，楼栋: {building}, 天数: {days}")
+        try:
+            since = (datetime.now().date() - timedelta(days=int(days))).isoformat()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 模板按学校档案生成（本校为 "72-%室电表"），水表一起要 → 把「电表」放宽为「%表」
+                    like = school_profile.dorm_device_like(building).replace("电表", "%表")
+                    cursor.execute("SHOW TABLES LIKE 'usage_daily'")
+                    has_usage = cursor.fetchone() is not None
+
+                    usage_sum = ("(SELECT SUM(u.usage_amount) FROM usage_daily u "
+                                 "WHERE u.device_id = d.id AND u.day >= %s)") if has_usage else "NULL"
+                    usage_days = ("(SELECT COUNT(*) FROM usage_daily u "
+                                  "WHERE u.device_id = d.id AND u.day >= %s)") if has_usage else "0"
+                    sql = f"""
+                        SELECT d.id, d.equipmentName, d.installationSite, d.equipmentType, d.rate,
+                               (SELECT dd.remainingBalance FROM data dd WHERE dd.device_id = d.id
+                                 ORDER BY dd.read_time DESC LIMIT 1) AS balance,
+                               (SELECT dd.read_time FROM data dd WHERE dd.device_id = d.id
+                                 ORDER BY dd.read_time DESC LIMIT 1) AS last_time,
+                               {usage_sum} AS usage_sum,
+                               {usage_days} AS usage_days
+                        FROM device d
+                        WHERE d.equipmentName LIKE %s
+                    """
+                    sql_params = ([since, since] if has_usage else []) + [like]
+                    print(f"[INFO] 统计表格SQL(含用量表={has_usage})")
+                    cursor.execute(sql, sql_params)
+                    rows = cursor.fetchall()
+                    print(f"[INFO] 查到 {len(rows)} 台设备")
+
+            devices = []
+            for r in rows:
+                info = school_profile.parse_room(r[1] or "") or {}
+                devices.append({
+                    "device_id": str(r[0]),
+                    "equipmentName": r[1],
+                    "installationSite": r[2],
+                    "equipmentType": str(r[3]) if r[3] is not None else None,
+                    "kind": ("电" if str(r[3]) == "0" else "水" if str(r[3]) == "1" else info.get("kind")),
+                    "rate": float(r[4]) if r[4] is not None else None,
+                    "balance": float(r[5]) if r[5] is not None else None,
+                    "last_time": str(r[6]) if r[6] is not None else None,
+                    "usage_sum": float(r[7]) if r[7] is not None else None,
+                    "usage_days": int(r[8]) if r[8] is not None else 0,
+                    "room": info.get("room"),
+                    "room_no": info.get("room_no"),
+                    "floor": info.get("floor"),
+                })
+
+            # 排序：楼层（未知排最后）→ 寝室号 → 表类型（电在前）
+            devices.sort(key=lambda d: (
+                d["floor"] if d["floor"] is not None else 999,
+                d["room_no"] if d["room_no"] is not None else 99999,
+                0 if d["kind"] == "电" else 1,
+            ))
+
+            # 按楼层分组
+            floors, cur_floor, bucket = [], "___", []
+            for d in devices:
+                if d["floor"] != cur_floor:
+                    if bucket:
+                        floors.append({"floor": cur_floor, "count": len(bucket),
+                                       "rooms": bucket})
+                    cur_floor, bucket = d["floor"], []
+                bucket.append(d)
+            if bucket:
+                floors.append({"floor": cur_floor, "count": len(bucket), "rooms": bucket})
+
+            return {
+                "code": 200,
+                "building": building,
+                "days": int(days),
+                "since": since,
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "has_usage_table": has_usage,
+                "total": len(devices),
+                "floor_count": len(floors),
+                "columns": ["楼层", "寝室", "类型", "余额", "近%d天用量" % int(days), "最近更新"],
+                "floors": floors,
+                "devices": devices,
+            }
+        except Exception as e:
+            print(f"[ERROR] 统计表格生成失败: {e}")
+            traceback.print_exc()
+            msg = str(e)
+            if "Illegal mix of collations" in msg:
+                msg = ("usage_daily 与 device/data 表的排序规则不一致，请执行："
+                       "ALTER TABLE usage_daily CONVERT TO CHARACTER SET utf8mb4 "
+                       "COLLATE utf8mb4_general_ci;")
+            return {"code": "500", "error": f"统计表格生成失败: {msg}"}
+
+    @staticmethod
     def get_building_hourly_data(building, start_day, end_day):
         """宿管模式：获取指定楼栋所有电表的小时级用电量数据"""
         print(f"[INFO] 开始获取楼栋小时数据，楼栋: {building}, 日期: {start_day} ~ {end_day}")
@@ -658,6 +786,26 @@ class RequestHandler(BaseHTTPRequestHandler):
                 else:
                     print("[WARN] 缺少必要参数 building, start_day 或 end_day")
                     response_data = {"code": "400", "error": "缺少必要参数 building, start_day 或 end_day"}
+            elif mode == 'stats_table':
+                # 统计表格：按楼层分类、按寝室号排序（format=csv 直接下载表格文件）
+                building = params.get('building', [None])[0]
+                days_raw = params.get('days', ['30'])[0]
+                fmt = (params.get('format', ['json'])[0] or 'json').lower()
+                print(f"[INFO] 处理统计表格请求，楼栋: {building}, 天数: {days_raw}, 格式: {fmt}")
+                building_pattern = school_profile.get("building_pattern")
+                if not building or not re.match(building_pattern, building):
+                    response_data = {"code": "400", "error": f"无效的楼栋号: {building}"}
+                else:
+                    try:
+                        days_int = max(1, min(int(days_raw), 3650))
+                    except (TypeError, ValueError):
+                        days_int = 30
+                    result = DataQuery.get_stats_table(building, days_int)
+                    if fmt == 'csv' and result.get('code') == 200:
+                        response_data = {"__csv__": stats_table_to_csv(result),
+                                         "__filename__": f"stats_building{building}_{days_int}d.csv"}
+                    else:
+                        response_data = result
             elif mode == 'search':
                 # 搜索设备
                 keyword = params.get('key_word', [None])[0]
@@ -685,14 +833,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 # 设置响应头
                 self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')  # 允许跨域
-                self.end_headers()
-                
-                # 发送响应
-                response_str = json.dumps(response_data, ensure_ascii=False)
-                print(f"[INFO] 发送响应，响应长度: {len(response_str)}")
-                self.wfile.write(response_str.encode('utf-8'))
+                if isinstance(response_data, dict) and "__csv__" in response_data:
+                    # CSV 下载（带 BOM，Excel 直接打开不乱码）
+                    self.send_header('Content-type', 'text/csv; charset=utf-8')
+                    self.send_header('Content-Disposition',
+                                     'attachment; filename=%s' % response_data.get("__filename__", "stats.csv"))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Access-Control-Expose-Headers', 'Content-Disposition')
+                    self.end_headers()
+                    csv_bytes = b'\xef\xbb\xbf' + response_data["__csv__"].encode('utf-8')
+                    print(f"[INFO] 发送CSV响应，长度: {len(csv_bytes)}")
+                    self.wfile.write(csv_bytes)
+                else:
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')  # 允许跨域
+                    self.end_headers()
+
+                    # 发送响应
+                    response_str = json.dumps(response_data, ensure_ascii=False)
+                    print(f"[INFO] 发送响应，响应长度: {len(response_str)}")
+                    self.wfile.write(response_str.encode('utf-8'))
                 
                 # 确保数据发送完成
                 self.wfile.flush()

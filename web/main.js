@@ -59,8 +59,10 @@ function destroyMainChart() {
 
 // 带超时的fetch函数
 async function fetchWithTimeout(url, options = {}) {
-    // 使用默认超时时间5000毫秒,如果配置已加载则使用配置的值
-    const timeout = (CONFIG && CONFIG.API_TIMEOUT) ? CONFIG.API_TIMEOUT : 5000;
+    // 使用默认超时时间5000毫秒,如果配置已加载则使用配置的值；可用 options.timeout 覆盖
+    const timeout = (options && typeof options.timeout === 'number')
+        ? options.timeout
+        : ((CONFIG && CONFIG.API_TIMEOUT) ? CONFIG.API_TIMEOUT : 5000);
     
     const timeoutId = setTimeout(() => {
         console.error(`请求超时: ${url}`);
@@ -182,6 +184,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // 初始化宿管模式
             initDormMode();
+            initStatsTable();
             
             // 显示连接服务器提示
             const cardsContainer = document.getElementById('cards-container');
@@ -2237,4 +2240,124 @@ function applyDormFilters() {
     }
     summaryBar.textContent = summaryText;
     container.insertBefore(summaryBar, container.firstChild);
+}
+
+/* ================= 统计表格：按楼层分类、按寝室号排序 ================= */
+let statsBuildingsLoaded = false;
+
+async function refreshStatsBuildingSelect() {
+    const sel = document.getElementById('stats-building');
+    if (!sel || statsBuildingsLoaded) return;
+    try {
+        const apiUrl = getApiUrl('main');
+        const resp = await fetchWithTimeout(`${apiUrl}/?mode=list_buildings`);
+        const data = await resp.json();
+        const list = (data && data.buildings) || [];
+        if (list.length) {
+            sel.innerHTML = list.map(b => `<option value="${b.building}">${b.building}栋（${b.count} 台）</option>`).join('');
+            statsBuildingsLoaded = true;
+        }
+    } catch (e) {
+        console.warn('楼栋列表获取失败:', e);
+    }
+    if (!sel.options.length) {
+        sel.innerHTML = '<option value="72">72栋</option>';
+    }
+}
+
+function renderStatsTable(data) {
+    const box = document.getElementById('stats-table-container');
+    if (!box) return;
+    if (!data || data.code !== 200) {
+        box.innerHTML = `<div class="stats-empty">生成失败：${(data && (data.error || data.code)) || '未知错误'}</div>`;
+        return;
+    }
+    const days = data.days;
+    let html = `<div class="stats-summary">${data.building}栋 · 共 ${data.total} 台 · ${data.floor_count} 个楼层 · 近 ${days} 天（${data.since} 起）`
+        + (data.has_usage_table ? '' : ' · 尚未回填按天用量（跑 debug_utils/daily_backfill.py）')
+        + `<br><span class="muted">按楼层分类、楼层内按寝室号排序；余额标红表示 ≤ 10 元</span></div>`;
+    html += '<table class="stats-table"><thead><tr>'
+        + '<th>楼层</th><th>寝室</th><th>类型</th><th>余额(元)</th>'
+        + `<th>近${days}天用量</th><th>单价</th><th>最近更新</th></tr></thead><tbody>`;
+    (data.floors || []).forEach(f => {
+        const label = (f.floor === null || f.floor === undefined) ? '未知楼层' : `${f.floor} 楼`;
+        html += `<tr class="floor-row"><td colspan="7">${label} · ${f.count} 台</td></tr>`;
+        (f.rooms || []).forEach(r => {
+            const bal = (r.balance === null || r.balance === undefined) ? '—' : Number(r.balance).toFixed(2);
+            const lowCls = (r.balance !== null && r.balance !== undefined && Number(r.balance) <= 10) ? ' low-balance' : '';
+            const use = (r.usage_sum === null || r.usage_sum === undefined) ? '—' : Number(r.usage_sum).toFixed(2);
+            const rate = (r.rate === null || r.rate === undefined) ? '—' : Number(r.rate).toFixed(4);
+            html += `<tr><td>${f.floor === null || f.floor === undefined ? '' : f.floor}</td>`
+                + `<td>${r.room ? r.room + ' 室' : (r.equipmentName || '')}</td>`
+                + `<td>${r.kind || ''}</td>`
+                + `<td class="num${lowCls}">${bal}</td>`
+                + `<td class="num">${use}</td>`
+                + `<td class="num">${rate}</td>`
+                + `<td>${r.last_time ? String(r.last_time).slice(0, 16) : '—'}</td></tr>`;
+        });
+    });
+    html += '</tbody></table>';
+    box.innerHTML = html;
+}
+
+async function loadStatsTable() {
+    const sel = document.getElementById('stats-building');
+    const daysEl = document.getElementById('stats-days');
+    const building = sel ? sel.value : '72';
+    const days = daysEl && daysEl.value ? parseInt(daysEl.value, 10) : 30;
+    const box = document.getElementById('stats-table-container');
+    if (box) box.innerHTML = '<div class="stats-empty">正在生成…</div>';
+    try {
+        const apiUrl = getApiUrl('main');
+        const resp = await fetchWithTimeout(`${apiUrl}/?mode=stats_table&building=${encodeURIComponent(building)}&days=${days}`, { timeout: 60000 });
+        const data = await resp.json();
+        renderStatsTable(data);
+    } catch (e) {
+        if (box) box.innerHTML = `<div class="stats-empty">请求失败：${e.message || e}</div>`;
+    }
+}
+
+function statsExportUrl(building) {
+    const daysEl = document.getElementById('stats-days');
+    const days = daysEl && daysEl.value ? parseInt(daysEl.value, 10) : 30;
+    return `${getApiUrl('main')}/?mode=stats_table&building=${encodeURIComponent(building)}&days=${days}&format=csv`;
+}
+
+function downloadCsv(url, filename) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+function initStatsTable() {
+    refreshStatsBuildingSelect();
+    const q = document.getElementById('stats-query-btn');
+    if (q) q.addEventListener('click', loadStatsTable);
+    const ex = document.getElementById('stats-export-btn');
+    if (ex) ex.addEventListener('click', () => {
+        const sel = document.getElementById('stats-building');
+        const b = sel ? sel.value : '72';
+        downloadCsv(statsExportUrl(b), `stats_building${b}.csv`);
+    });
+    const exAll = document.getElementById('stats-export-all-btn');
+    if (exAll) exAll.addEventListener('click', async () => {
+        const sel = document.getElementById('stats-building');
+        const list = sel ? [...sel.options].map(o => o.value) : ['72'];
+        for (const b of list) {
+            downloadCsv(statsExportUrl(b), `stats_building${b}.csv`);
+            await new Promise(r => setTimeout(r, 600));   // 别把后端/浏览器一起挤爆
+        }
+    });
+    // 切到该页签时若还没数据就自动生成一次
+    document.querySelectorAll('.tab[data-tab="stats-table"]').forEach(t => {
+        t.addEventListener('click', () => {
+            const box = document.getElementById('stats-table-container');
+            if (box && box.querySelector('.stats-empty') && !box.querySelector('table')) {
+                loadStatsTable();
+            }
+        });
+    });
 }
