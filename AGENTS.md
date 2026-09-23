@@ -4,7 +4,7 @@ This file provides guidance to Qoder (qoder.com) when working with code in this 
 
 ## Project Overview
 
-三一工学院宿舍水电费自动查询监控系统。采集学校网站水电数据存入 MySQL，提供 Web 可视化、邮件预警、宿管模式等功能的单体 Python 项目。
+宿舍水电费自动查询监控系统（已适配湖南工业大学 sdjf.hnuit.edu.cn）。采集学校网站水电数据存入 MySQL，提供 Web 可视化、邮件预警、宿管模式等功能的单体 Python 项目。学校相关差异集中在 server/libs/school_profile.py。
 
 ## Running & Development
 

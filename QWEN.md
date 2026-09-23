@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-三一工学院宿舍水电费自动查询监控系统。通过模拟学校网站（sywap.funsine.com）的登录和数据查询流程（含参数签名算法），自动采集水电表读数存入 MySQL，提供 Web 可视化面板、邮件预警订阅、宿管模式等功能的单体 Python 项目。
+宿舍水电费自动查询监控系统（本仓库适配**湖南工业大学** `sdjf.hnuit.edu.cn`；源自三一工学院版，两校同一套厂商接口）。通过模拟学校网站的登录和数据查询流程（含参数签名算法），自动采集水电表读数存入 MySQL，提供 Web 可视化面板、邮件预警订阅、宿管模式等功能的单体 Python 项目。学校差异集中在 `server/libs/school_profile.py`。
 
 ### 核心技术栈
 
@@ -22,7 +22,8 @@
 ```
 /
 ├── debug_utils/             # 开发工具脚本
-│   ├── login.py             # 学校网站登录（含 MD5 签名）
+│   ├── login.py             # 取 appUserId/roleId（本校无需密码）
+│   ├── list_buildings.py    # 扫描设备名统计楼栋号
 │   ├── get_data.py          # 单次查询水电费数据
 │   ├── check_data.py        # 分页查询所有设备数据
 │   ├── data2sql/            # 采集入库
@@ -104,7 +105,7 @@ python3 server/aokbalance_get.py      # Aoksend 余额查询 → 端口 8082
 ### 基础数据采集流程
 
 ```bash
-python3 debug_utils/login.py <手机号> <密码>                # 获取 appUserId 和 roleId
+python3 debug_utils/login.py <学号> [密码]                   # 获取 appUserId 和 roleId
 python3 debug_utils/get_data.py <appUserId> <roleId>        # 查询设备电量数据
 python3 debug_utils/check_data.py <appUserId> <roleId> [pageNum] [pageSize]  # 分页查询
 python3 debug_utils/data2sql/data2sql.py <appUserId> <roleId> [pageNum] [pageSize]    # 采集入库
@@ -164,7 +165,8 @@ MySQL + `pymysql`，连接池大小为 30（3× 线程池大小）。`server/lib
 `server/libs/` 是项目的核心共享库，包含所有可复用的业务逻辑：
 
 - **`signer.py`** — 签名算法（MD5 + 字典序排序 + `SIGN_KEY`），生成学校 API 请求签名
-- **`api_client.py`** — 学校 API 封装：`login()`, `get_account_list()`, `get_device_list()`
+- **`api_client.py`** — 学校 API 封装：`login()`, `get_user_by_phone()`, `get_account_list()`, `get_device_list()`
+- **`school_profile.py`** — 学校档案：API 主机、宿管表名规则、楼栋列表（切学校改这里）
 - **`aoksender.py`** — Aoksend 邮件客户端：`send_email()`, `check_balance()`, `validate_email()`, `validate_file()`
 - **`db_pool.py`** — MySQL 连接池：`init_pool()`, `init_pool_from_ini()`, `get_connection()`
 
@@ -296,9 +298,10 @@ from hourly_report import (...)
 ### 重要硬编码值
 
 - 签名密钥：`SIGN_KEY = "DJKSBNW123"`
-- 学校 API 基础地址：`http://sywap.funsine.com/prod-api/external/`
+- 学校 API 基础地址：见 `server/libs/school_profile.py`（本校 `https://sdjf.hnuit.edu.cn/prod-api/external`）
 - 渠道 ID：`channelid = "1003"`
-- 宿管模式楼栋白名单正则：`^(1|2|3|5|6|7|8|9|10)$`（楼栋 4 被排除）
+- 宿管模式楼栋：不再写死；`school_profile.building_pattern` 只校验格式，
+  楼栋列表由 `server.py` 的 `mode=list_buildings` 按库里的设备名实时统计
 - 前端搜索关键词至少 2 字符
 - 设备类型：`0`=电表, `1`=水表
 - `data_cleaner/hourly_report.py` 的 `--date-range` 模式每天输出一个独立 CSV 文件

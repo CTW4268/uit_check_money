@@ -18,6 +18,9 @@ import re
 from datetime import datetime, date, timedelta
 from contextlib import contextmanager
 
+# 学校档案（宿管模式的楼栋规则随学校不同，集中放在 libs/school_profile.py）
+from libs import school_profile
+
 # 导入 data_cleaner 清洗算法
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'data_cleaner'))
 from hourly_report import (build_24h_hours, build_slot_max, fill_missing_slots,
@@ -356,6 +359,35 @@ class DataQuery:
             return {"code": "500", "error": f"数据库查询错误: {str(e)}"}
 
     @staticmethod
+    def get_building_list():
+        """
+        宿管模式：从 device 表统计楼栋前缀，供前端动态生成楼栋按钮。
+
+        楼栋号随学校不同（本校为 "102-0914室电表" 这类前缀，三一为 "学1栋..."），
+        写死在 HTML 里会过时，所以改成按已入库的设备名实时统计。
+        匹配规则同样来自学校档案的 dorm_device_name_like。
+        """
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT equipmentName FROM device WHERE equipmentType = 0")
+                    rows = cursor.fetchall()
+        except Exception as e:
+            print(f"[ERROR] 获取楼栋列表失败: {str(e)}")
+            return {"code": "500", "error": f"数据库查询错误: {str(e)}"}
+
+        counts = {}
+        for (name,) in rows:
+            building = school_profile.parse_building(name)
+            if building:
+                counts[building] = counts.get(building, 0) + 1
+
+        buildings = [{"building": b, "count": c}
+                     for b, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+        print(f"[INFO] 楼栋列表统计完成，共 {len(buildings)} 个楼栋")
+        return {"code": 200, "buildings": buildings}
+
+    @staticmethod
     def get_building_hourly_data(building, start_day, end_day):
         """宿管模式：获取指定楼栋所有电表的小时级用电量数据"""
         print(f"[INFO] 开始获取楼栋小时数据，楼栋: {building}, 日期: {start_day} ~ {end_day}")
@@ -370,7 +402,10 @@ class DataQuery:
                         WHERE equipmentType = 0 AND equipmentName LIKE %s
                         ORDER BY equipmentName
                     """
-                    pattern = f"学{building}栋%电表"
+                    # 表名匹配模板来自学校档案：
+                    #   湖南工业大学 "102-0914室电表" -> "102-%室电表"
+                    #   三一工学院   "学1栋101室电表" -> "学1栋%电表"
+                    pattern = school_profile.dorm_device_like(building)
                     print(f"[INFO] 查询楼栋设备，模式: {pattern}")
                     cursor.execute(device_sql, (pattern,))
                     device_rows = cursor.fetchall()
@@ -568,6 +603,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 else:
                     print("[WARN] 缺少必要参数 device_id, start_day 或 end_day")
                     response_data = {"code": "400", "error": "缺少必要参数 device_id, start_day 或 end_day"}
+            elif mode == 'list_buildings':
+                # 宿管模式：楼栋列表（前端据此动态生成楼栋按钮）
+                print("[INFO] 处理楼栋列表请求")
+                response_data = DataQuery.get_building_list()
             elif mode == 'check_hourly_building':
                 # 宿管模式：按楼栋查询小时级用电量
                 building = params.get('building', [None])[0]
@@ -575,10 +614,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 end_day = params.get('end_day', [None])[0]
                 print(f"[INFO] 处理宿管模式请求，楼栋: {building}, 日期: {start_day} ~ {end_day}")
                 if building and start_day and end_day:
-                    # 验证楼栋号白名单
-                    if not re.match(r'^(1|2|3|5|6|7|8|9|10)$', building):
+                    # 验证楼栋号（规则来自学校档案；匹配不到的楼栋会查不到设备，不需要写死白名单）
+                    building_pattern = school_profile.get("building_pattern")
+                    if not re.match(building_pattern, building):
                         print(f"[WARN] 无效的楼栋号: {building}")
-                        response_data = {"code": "400", "error": "无效的楼栋号，有效值为1,2,3,5,6,7,8,9,10"}
+                        response_data = {"code": "400",
+                                         "error": f"无效的楼栋号: {building}"}
                     else:
                         try:
                             start_date = datetime.strptime(start_day, '%Y-%m-%d').date()

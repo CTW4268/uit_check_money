@@ -1,12 +1,82 @@
-# sany_check_money
+# uit_check_money（湖南工业大学版）
 
-三一工学院自动查询水电费脚本
+宿舍水电费自动查询 / 监控 / 预警脚本。
+
+> 本仓库 fork 自 [sany_check_money](https://github.com/CTW4268/uit_check_money)（三一工学院版），
+> 已把学校接口适配到**湖南工业大学**（`sdjf.hnuit.edu.cn`）。
+> 两校用的是同一套厂商接口，只有「主机、登录方式、宿管楼栋规则」三处不同，
+> 全部集中在 `server/libs/school_profile.py`，改一处即可切换学校。
 
 ## 项目简介
 
-`sany_check_money` 是一个功能强大的Python脚本项目，专为三一工学院学生设计，用于自动查询宿舍水电费信息。该项目通过模拟学校网站的登录和数据查询过程，实现了自动化的水电费信息获取，并提供邮件预警、数据库存储、Web可视化界面等丰富功能。
+本项目用于自动查询宿舍水电费信息（湖南工业大学）。该项目通过模拟学校网站的登录和数据查询过程，实现了自动化的水电费信息获取，并提供邮件预警、数据库存储、Web可视化界面等丰富功能。
 
 对于经常忘记查询水电费余额而导致停电停水的同学，这个项目可以帮助你实时监控余额并在低于设定阈值时自动发送邮件提醒，让你及时充值，避免影响正常生活。
+
+## 本校接口适配说明（湖南工业大学，2026-09 实测）
+
+| 项目 | 湖南工业大学 | 说明 |
+|------|--------------|------|
+| API 基础地址 | `https://sdjf.hnuit.edu.cn/prod-api/external` | 与三一版同厂商，接口路径完全一致 |
+| 签名密钥 | `DJKSBNW123` | 相同 |
+| 登录 | 统一身份认证（CAS）；`POST /appUser/login` 仅对 App 内注册过的账号有效 | 见下方「取参」 |
+| 查询鉴权 | **查询接口不校验登录态** | 不带 Cookie / Admin-Token 也返回同样结果 |
+
+### 1. 取 appUserId / roleId（无需密码）
+
+```bash
+python3 debug_utils/login.py <学号>
+# {"code": 200, "appUserId": "...", "roleId": 2, "phoneNum": "...", "direct_login": false}
+```
+
+原理：`GET /external/appUser/{学号}` 不需要登录就能返回 `appUserId` / `roleId`
+（前端登录后也是先调这个接口拿 `appUserId` 存进 localStorage）。
+传了密码时会先试 `POST /appUser/login`；本校账号走统一身份认证，
+若该账号没在校园 App 里注册过，服务端返回 `202 该账号尚未注册`，
+脚本自动回落到上面的无密码方式（输出里 `direct_login=false` 表示走了回落）。
+
+### 2. 原版签名算法少了一个 `&`（已修）
+
+前端拼接的是 `"大写KEY=大写VALUE&"`，**每个键值对都以 `&` 结尾（含最后一个）**：
+
+```js
+// js 里的拦截器
+Object.keys(e).sort().map(a => { n += `${a.toUpperCase()}=${t[a].toUpperCase()}&` });
+md5(n + "DJKSBNW123")
+```
+
+原版 Python 用的是 `"&".join(...)`，最后一个键值对后面没有 `&`，得到的签名是错的。
+`/external/appUserAcct/list` 不校验签名，所以一直没暴露；
+但 `/external/equipment/list` 会校验，直接返回 `201 验证签名失败！`。
+已修 `server/libs/signer.py`，并加了 `python3 server/libs/signer.py` 自检（含回归护栏）。
+
+### 3. `equipment/list` 的语义差异
+
+本校 `/external/equipment/list` 返回该 `roleKey` 下的**全部设备台账**（实测 14072 台），
+传进去的 `appUserId` 会被忽略（与三一版不同）。
+所以：
+
+* 只想看**自己的**表 → `get_account_list(appUserId, roleId)`（`appUserAcct/list`）；
+* 需要**全校/学院台账**（宿管模式）→ `get_device_list(...)`。
+
+单页条数建议 ≤ 500：本校实测 `pageSize=1000` 时第 3 页起会服务端超时。
+
+### 4. 宿管模式（楼栋）改动
+
+* 表名规则：本校是 `102-0914室电表`，三一是 `学1栋101室电表`
+  → 统一交给 `school_profile.dorm_device_name_like` / `parse_building()`；
+* 楼栋列表不再写死：后端新增 `?mode=list_buildings`，按 `device` 表里的设备名实时统计，
+  前端 `refreshBuildingButtons()` 动态生成按钮（接口失败则沿用 HTML 里的兜底按钮）；
+* 楼栋号校验只校验格式，不再用写死的白名单。
+
+### 5. 切换/新增学校
+
+```bash
+SCHOOL_PROFILE=sany python3 debug_utils/get_data.py ...   # 临时切回三一档案
+```
+
+新增学校：在 `server/libs/school_profile.py` 的 `PROFILES` 里复制一份，
+改 `base_url` / `dorm_device_name_like` / `dorm_buildings` 三处即可，其余代码不用动。
 
 ## 核心功能
 
@@ -54,7 +124,7 @@
 ## 项目结构
 
 ```
-sany_check_money/
+uit_check_money/
 ├── debug_utils/              # 开发工具脚本
 │   ├── login.py              # 用户登录脚本
 │   ├── get_data.py           # 水电费数据查询脚本
@@ -124,15 +194,22 @@ mysql_server = your_mysql_host
 mysql_port = 3306
 login_user = your_username
 login_passwd = your_password
-db_schema = sany_check_money
+db_schema = hnuit_check_money
 ```
 
 ### 3. 基础查询
 
-登录获取用户信息：
+获取 appUserId 与 roleId（后续所有脚本都要用）：
 
 ```bash
-python3 debug_utils/login.py <手机号> <密码>
+python3 debug_utils/login.py <学号>          # 本校推荐：无需密码
+python3 debug_utils/login.py <学号> <密码>    # 走厂商直连登录接口（未注册会自动回落）
+```
+
+扫描楼栋号（填 school_profile.py 的 dorm_buildings 用）：
+
+```bash
+python3 debug_utils/list_buildings.py [roleKey] [页数] [每页条数]
 ```
 
 查询水电费数据：

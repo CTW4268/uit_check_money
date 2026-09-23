@@ -110,12 +110,13 @@ def send_mail(config, subject, content):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("用法: ./debug_utils/monitor_daemon/monitor_daemon.py <账号> <密码>")
+    if len(sys.argv) not in (2, 3):
+        print("用法: ./debug_utils/monitor_daemon/monitor_daemon.py <账号> [密码]")
         sys.exit(1)
 
     phone_num = sys.argv[1]
-    password = sys.argv[2]
+    # 密码可选：湖南工业大学走统一身份认证，不传密码时用学号直接换 appUserId/roleId
+    password = sys.argv[2] if len(sys.argv) == 3 else None
 
     print("正在加载监控配置...")
     try:

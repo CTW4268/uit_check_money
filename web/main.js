@@ -1974,6 +1974,43 @@ async function searchDevices(keyword) {
 // ========== 宿管模式 ==========
 
 // 初始化宿管模式
+// 绑定楼栋按钮点击（列表被刷新后需要重新绑定）
+function bindBuildingButtons() {
+    const buildingBtns = document.querySelectorAll('.building-btn');
+    buildingBtns.forEach(btn => {
+        btn.addEventListener('click', function() {
+            // 移除所有按钮高亮
+            buildingBtns.forEach(b => b.classList.remove('active'));
+            // 高亮当前按钮
+            this.classList.add('active');
+            currentBuilding = this.getAttribute('data-building');
+        });
+    });
+}
+
+// 从后端取楼栋列表（后端按数据库中的设备名统计，见 server.py 的 mode=list_buildings）
+async function refreshBuildingButtons() {
+    try {
+        const apiUrl = getApiUrl('main');
+        const response = await fetchWithTimeout(`${apiUrl}/?mode=list_buildings`);
+        const data = await response.json();
+        const list = (data && data.buildings) || [];
+        if (!list.length) {
+            console.warn('后端未返回楼栋列表（数据库里可能还没有电表数据），沿用 HTML 里的静态按钮');
+            return;
+        }
+        const container = document.querySelector('.building-buttons');
+        if (!container) return;
+        container.innerHTML = list.map(b =>
+            `<button class="building-btn" data-building="${b.building}">${b.building}栋 <span class="muted">(${b.count})</span></button>`
+        ).join('');
+        bindBuildingButtons();
+        console.log(`楼栋列表已按数据库刷新，共 ${list.length} 个楼栋`);
+    } catch (e) {
+        console.warn('获取楼栋列表失败，沿用 HTML 里的静态按钮:', e);
+    }
+}
+
 function initDormMode() {
     // 设置默认日期（昨天到今天）
     const today = new Date();
@@ -1985,17 +2022,10 @@ function initDormMode() {
     if (dormStartDate) dormStartDate.value = yesterday.toISOString().split('T')[0];
     if (dormEndDate) dormEndDate.value = today.toISOString().split('T')[0];
     
-    // 绑定楼栋按钮点击
-    const buildingBtns = document.querySelectorAll('.building-btn');
-    buildingBtns.forEach(btn => {
-        btn.addEventListener('click', function() {
-            // 移除所有按钮高亮
-            buildingBtns.forEach(b => b.classList.remove('active'));
-            // 高亮当前按钮
-            this.classList.add('active');
-            currentBuilding = this.getAttribute('data-building');
-        });
-    });
+    // 楼栋按钮：先按「数据库里实际存在的设备」刷新一次列表，再绑定点击
+    // （不同学校楼栋号不同，写死在 HTML 里会过时；刷新失败就沿用 HTML 里的静态按钮）
+    bindBuildingButtons();
+    refreshBuildingButtons();
     
     // 绑定查询按钮
     const queryBtn = document.getElementById('dorm-query-btn');

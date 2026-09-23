@@ -7,7 +7,8 @@ server/libs/__init__.py
 """
 
 from .signer import generate_sign, get_timestamp, md5_encrypt, SIGN_KEY, BASE_URL
-from .api_client import login, get_account_list, get_device_list
+from .api_client import login, get_user_by_phone, get_account_list, get_device_list
+from . import school_profile
 from .aoksender import send_email, check_balance, validate_email, validate_file
 from .db_pool import init_pool, init_pool_from_ini, get_connection, get_pool_size
 
@@ -15,7 +16,9 @@ __all__ = [
     # signer
     'generate_sign', 'get_timestamp', 'md5_encrypt', 'SIGN_KEY', 'BASE_URL',
     # api_client
-    'login', 'get_account_list', 'get_device_list',
+    'login', 'get_user_by_phone', 'get_account_list', 'get_device_list',
+    # school_profile
+    'school_profile',
     # aoksender
     'send_email', 'check_balance', 'validate_email', 'validate_file',
     # db_pool
