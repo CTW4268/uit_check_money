@@ -23,6 +23,7 @@ server/libs/api_client.py
 import requests
 
 from .signer import generate_sign, get_timestamp, md5_encrypt, BASE_URL, DEFAULT_HEADERS, CHANNEL_ID
+from . import school_profile
 
 
 # ─────────────────────────────────────────────
@@ -183,3 +184,73 @@ def get_device_list(app_user_id: str, role_key: str,
         "timestamp": get_timestamp()
     }
     return _get(_DEVICE_LIST_URL, params)
+
+
+def get_equipment_by_id(equipment_id: str) -> dict:
+    """
+    按设备 id 查单台设备（含完整字段：equipmentName / installationSite / equipmentType /
+    ratio / rate / equipmentStatus / equipmentLatestLarge / equipmentCurrentLarge 等）。
+
+    本校实测：该查询不需要登录态，多带一个 id 参数即可精确定位一台设备。
+    """
+    params = {
+        "roleKey": _profile_role_key(),
+        "id": equipment_id,
+        "pageNum": 1,
+        "pageSize": 1,
+        "channelid": CHANNEL_ID,
+        "timestamp": get_timestamp(),
+    }
+    url = f"{BASE_URL}{school_profile.get('equipment_by_id_path', '/equipment/list')}"
+    result = _get(url, params)
+    rows = result.get("rows") or []
+    return rows[0] if rows else {}
+
+
+def _profile_role_key() -> str:
+    """设备台账接口用的 roleKey，默认 2（本校为信息学院），可用学校档案覆盖。"""
+    return str(school_profile.get("role_key", "2"))
+
+
+def fetch_my_devices(app_user_id: str, role_id: str,
+                     page_num: int = 1, page_size: int = 100,
+                     enrich: bool = True) -> dict:
+    """
+    取「自己的」设备列表（含入库所需的完整字段）。
+
+    不同学校这套接口的行为不一样，按学校档案的 device_list_scoped_by_user 分流：
+
+      * True （如三一）：get_device_list(appUserId, roleKey, 分页) 本身就只返回该用户的设备；
+      * False（如本校）：equipment/list 会忽略 appUserId、返回学院全部台账（实测 1.4 万台），
+                         所以改用 appUserAcct/list 取自己的缴费对象，
+                         再用 equipment/equipment/list?id= 逐台补齐名称/类型/单价等字段。
+
+    Returns:
+        {"code": 200, "rows": [...]} —— rows 为可直接入库的设备 dict 列表
+    """
+    if school_profile.get("device_list_scoped_by_user", True):
+        return get_device_list(app_user_id, role_id, page_num, page_size)
+
+    account = get_account_list(app_user_id, role_id)
+    if account.get("code") != 200:
+        return account
+    rows = account.get("rows") or []
+    if not enrich:
+        return {"code": 200, "rows": rows, "total": len(rows)}
+
+    full_rows = []
+    for item in rows:
+        equipment_id = item.get("id")
+        detail = get_equipment_by_id(equipment_id) if equipment_id else {}
+        merged = dict(item)
+        # 设备接口的字段更全（名/位置/类型/单价/表底），缺失的用缴费对象那边的值兜底
+        for key, value in detail.items():
+            if value not in (None, ""):
+                merged[key] = value
+        for key in ("equipmentCurrentLarge", "remainingBalance", "equipmentStatus",
+                    "currentDealDate", "currentDealTime"):
+            if item.get(key) not in (None, ""):
+                merged[key] = item[key]
+        merged.setdefault("total", len(rows))
+        full_rows.append(merged)
+    return {"code": 200, "rows": full_rows, "total": len(full_rows)}

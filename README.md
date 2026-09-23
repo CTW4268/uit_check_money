@@ -2,7 +2,7 @@
 
 宿舍水电费自动查询 / 监控 / 预警脚本。
 
-> 本仓库 fork 自 [sany_check_money](https://github.com/CTW4268/uit_check_money)（三一工学院版），
+> 本仓库 fork 自 [xmb505/SANY_check_money](https://github.com/xmb505/SANY_check_money)（三一工学院版），
 > 已把学校接口适配到**湖南工业大学**（`sdjf.hnuit.edu.cn`）。
 > 两校用的是同一套厂商接口，只有「主机、登录方式、宿管楼栋规则」三处不同，
 > 全部集中在 `server/libs/school_profile.py`，改一处即可切换学校。
@@ -171,10 +171,25 @@ uit_check_money/
 
 ### 1. 环境准备
 
-确保已安装Python 3.x和必要的依赖库：
+需要 **Python 3.10 或更高**——`data_cleaner/hourly_report.py` 用了 `str | None` 这类写法，
+Python 3.9 在导入阶段就会报 `TypeError: unsupported operand type(s) for |`。
+推荐用虚拟环境（Homebrew 的 Python 受 PEP 668 保护，直接 pip install 会被拒）：
 
 ```bash
-pip install requests pymysql
+python3 -m venv .venv
+.venv/bin/pip install requests pymysql     # 全项目只依赖这两个第三方库
+.venv/bin/python --version                 # 实测 3.14 可用
+```
+
+MySQL 8+ / 26.x 均可，只需 `device`、`data`（以及邮件订阅要用的 `email`）三张表：
+
+```bash
+# macOS + Homebrew 实测流程
+brew install mysql
+mysqld --datadir=/opt/homebrew/var/mysql --socket=/tmp/mysql.sock --port=3306 &
+# 若数据目录为空，先执行一次：mysqld --initialize-insecure --datadir=/opt/homebrew/var/mysql
+mysql --socket=/tmp/mysql.sock -u root -e "CREATE DATABASE hnuit_check_money"
+mysql --socket=/tmp/mysql.sock -u root hnuit_check_money < doc/sql/import.sql   # 改掉文件里的 your_database_name
 ```
 
 ### 2. 数据库配置
@@ -240,14 +255,26 @@ python3 debug_utils/get_data.py <appUserId> <roleId>
 
 ### 6. Web服务
 
-启动Web后端API服务：
+先起后端 API（监听 8080）：
 
 ```bash
 cd server
-python3 server.py
+../.venv/bin/python server.py
 ```
 
-在浏览器中访问 `http://localhost:8080` 查看Web界面。
+前端是纯静态文件，**不**由 `server.py` 托管，需要另起一个静态服务器（后端已带
+`Access-Control-Allow-Origin: *`，跨端口没问题）：
+
+```bash
+cd web
+../.venv/bin/python -m http.server 3000
+```
+
+再把 `web/config.js` 的 `API_BASE_URL` 指向后端，然后浏览器打开 `http://127.0.0.1:3000`：
+
+```js
+API_BASE_URL: 'http://127.0.0.1:8080',
+```
 
 ## 配置说明
 

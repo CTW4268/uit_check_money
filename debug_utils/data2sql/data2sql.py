@@ -12,12 +12,19 @@ import configparser
 import pymysql
 from datetime import datetime
 
-from libs.api_client import get_device_list as _fetch_device_data
+from libs.api_client import fetch_my_devices as _fetch_device_data
 
 
 def load_mysql_config():
+    # 配置文件路径按脚本自身位置解析（原来用 './config/mysql.ini'，
+    # 只有在 debug_utils/data2sql/ 目录下执行才找得到，按 README 在仓库根目录跑会报
+    # "No section: 'mysql'"）
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'config', 'mysql.ini')
     config = configparser.ConfigParser()
-    config.read('./config/mysql.ini', encoding='utf-8')
+    config.read(config_path, encoding='utf-8')
+    if not config.has_section('mysql'):
+        raise FileNotFoundError(f"没读到 MySQL 配置: {config_path}（请从 example_mysql.ini 复制一份）")
     return {
         'host': config.get('mysql', 'mysql_server'),
         'port': config.getint('mysql', 'mysql_port'),
@@ -150,10 +157,13 @@ def main():
         sys.exit(1)
 
     # 直接调用，不再通过 subprocess
+    # fetch_my_devices 会按学校档案自动选择取数方式：
+    #   三一：equipment/list 按 appUserId 过滤，分页拉取
+    #   本校：appUserAcct/list 取自己的缴费对象 + 逐台补齐设备字段
     result = _fetch_device_data(app_user_id, role_id, page_num, page_size)
 
     if not result:
-        print("调用 get_device_list 失败，返回结果为空")
+        print("调用 fetch_my_devices 失败，返回结果为空")
         sys.exit(1)
 
     if result.get('code') != 200:

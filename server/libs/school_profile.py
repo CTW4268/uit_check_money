@@ -36,6 +36,13 @@ PROFILES = {
         # 兜底楼栋（HTML 静态按钮用）；运行时以 mode=list_buildings 的数据库统计为准。
         # 由 `python3 debug_utils/list_buildings.py` 扫描得到（服务端分页会超时，可能要扫几次）
         "dorm_buildings": ["102", "105", "104", "101", "91", "57", "17"],
+        # 按设备 id 精确查单台设备的接口路径（前端设备页用的就是这个双 equipment 路径）
+        "equipment_by_id_path": "/equipment/equipment/list",
+        # equipment/list 是否会按 appUserId 过滤：本校实测**不会**（会返回学院全部台账），
+        # 所以取「自己的设备」要走 appUserAcct/list + 逐台补齐字段
+        "device_list_scoped_by_user": False,
+        # 设备台账接口用的 roleKey（本校信息学院为 2）
+        "role_key": "2",
         "login_note": (
             "本校使用统一身份认证（CAS）登录 sdjf 子系统；"
             "POST /appUser/login 仅对在校园 App 内注册过的账号可用，"
@@ -52,6 +59,10 @@ PROFILES = {
         "dorm_device_name_like": "学{building}栋%电表",
         "building_pattern": r"^(1|2|3|5|6|7|8|9|10)$",
         "dorm_buildings": ["1", "2", "3", "5", "6", "7", "8", "9", "10"],
+        "equipment_by_id_path": "/equipment/list",
+        # 三一：equipment/list 按 appUserId 过滤，直接分页拉取即可
+        "device_list_scoped_by_user": True,
+        "role_key": "2",
         "login_note": "原版：POST /appUser/login（手机号 + MD5 密码）直连登录。",
     },
 }
@@ -85,7 +96,7 @@ _BUILDING_RE_CACHE = {}
 
 
 def building_prefix_regex():
-    """
+    r"""
     把 dorm_device_name_like 模板编译成「提取楼栋前缀」的正则（带缓存）。
 
         "{building}-%室电表"  ->  ^([0-9]+)\-.*室电表$
